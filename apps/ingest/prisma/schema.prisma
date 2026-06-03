@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  status    String   @default("ACTIVE")
+  devices   Device[]
+  alarms    Alarm[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Device {
+  id         String    @id @default(uuid())
+  tenantId   String
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deviceKey  String    @unique
+  name       String
+  protocol   String    @default("MQTT")
+  status     String    @default("OFFLINE")
+  location   String?
+  lastSeenAt DateTime?
+  alarms     Alarm[]
+  metrics    DeviceMetric[]
+  alarmRules DeviceAlarmRule[]
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([tenantId])
+  @@index([status])
+}
+
+model DeviceMetric {
+  id         String   @id @default(uuid())
+  deviceId   String
+  device     Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  identifier String
+  name       String
+  dataType   String
+  unit       String?
+  decimals   Int      @default(2)
+  accessMode String   @default("READ_ONLY")
+  enabled    Boolean  @default(true)
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([deviceId, identifier])
+  @@index([deviceId])
+}
+
+model DeviceAlarmRule {
+  id         String   @id @default(uuid())
+  deviceId   String
+  device     Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  identifier String
+  operator   String
+  threshold  Float
+  hysteresis Float    @default(0)
+  level      String   @default("WARNING")
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([deviceId])
+  @@unique([deviceId, identifier, operator])
+}
+
+model Alarm {
+  id         String    @id @default(uuid())
+  tenantId   String
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deviceId   String
+  device     Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  type       String
+  level      String    @default("WARNING")
+  message    String
+  status     String    @default("OPEN")
+  value      Float?
+  threshold  Float?
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([tenantId])
+  @@index([deviceId])
+  @@index([status])
+}
