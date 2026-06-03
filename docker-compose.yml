@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: weikong_iot
+      POSTGRES_USER: weikong
+      POSTGRES_PASSWORD: weikong123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weikong -d weikong_iot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_DB: weikong_ts
+      POSTGRES_USER: weikong
+      POSTGRES_PASSWORD: weikong123
+    ports:
+      - "5433:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  emqx:
+    image: emqx/emqx:latest
+    volumes:
+      - ./infra/emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+      - "8084:8084"
+      - "18083:18083"
+
+  api:
+    build: ./apps/api
+    environment:
+      DATABASE_URL: postgresql://weikong:weikong123@postgres:5432/weikong_iot?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: weikong_iot_secret
+      JWT_EXPIRES_IN: 7d
+      PORT: 3100
+      TIMESCALE_DATABASE_URL: postgresql://weikong:weikong123@timescaledb:5432/weikong_ts
+    ports:
+      - "3100:3100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  ingest:
+    build: ./apps/ingest
+    environment:
+      DATABASE_URL: postgresql://weikong:weikong123@postgres:5432/weikong_iot?schema=public
+      MQTT_URL: mqtt://emqx:1883
+      MQTT_USERNAME: platform-ingest
+      TIMESCALE_DATABASE_URL: postgresql://weikong:weikong123@timescaledb:5432/weikong_ts
+      DEVICE_OFFLINE_TIMEOUT_SECONDS: 90
+      DEVICE_OFFLINE_SCAN_INTERVAL_SECONDS: 30
+      TEMPERATURE_HIGH_THRESHOLD: 30
+      HUMIDITY_HIGH_THRESHOLD: 80
+      BATTERY_LOW_THRESHOLD: 20
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_started
+      timescaledb:
+        condition: service_started
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        VITE_API_BASE_URL: http://localhost:3100
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  timescale_data:
+  redis_data:
