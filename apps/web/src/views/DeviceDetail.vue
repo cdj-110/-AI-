@@ -268,7 +268,7 @@ async function reorderMetricCards(sourceKey: string, targetKey: string) {
 }
 
 async function importMetrics() {
-  if (importForm.templateDeviceId === '') {
+  if (!importForm.templateDeviceId) {
     ElMessage.warning('请选择要复用的模板设备');
     return;
   }
