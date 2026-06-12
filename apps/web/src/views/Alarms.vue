@@ -44,6 +44,7 @@ async function resolveAlarm(alarm: AlarmItem) {
 }
 
 function typeLabel(type: string) {
+  if (type.startsWith('RULE_')) return '规则告警';
   return { TEMPERATURE_HIGH: '温度过高', HUMIDITY_HIGH: '湿度过高', BATTERY_LOW: '电量过低' }[type] ?? type;
 }
 

@@ -5,3 +5,7 @@ dist/
 *.log
 api.local.log
 .DS_Store
+.runtime/
+/go.mod
+apps/gateway-go/config.local.json
+apps/gateway-go/gateway-*

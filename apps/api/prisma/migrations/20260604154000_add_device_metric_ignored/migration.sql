@@ -1,0 +1,1 @@
+ALTER TABLE "DeviceMetric" ADD COLUMN "ignored" BOOLEAN NOT NULL DEFAULT false;

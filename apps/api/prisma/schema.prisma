@@ -14,28 +14,45 @@ model Tenant {
   users     User[]
   devices   Device[]
   alarms    Alarm[]
+  loginLogs LoginLog[]
+  operationLogs OperationLog[]
+  deviceLogs DeviceLog[]
+  modelTemplates DeviceModelTemplate[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
 model Device {
-  id         String    @id @default(uuid())
-  tenantId   String
-  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  deviceKey  String    @unique
-  name       String
-  protocol   String    @default("MQTT")
-  status     String    @default("OFFLINE")
-  location   String?
-  lastSeenAt DateTime?
-  alarms     Alarm[]
-  metrics    DeviceMetric[]
-  alarmRules DeviceAlarmRule[]
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id                    String    @id @default(uuid())
+  tenantId              String
+  tenant                Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deviceKey             String    @unique
+  mqttClientId          String    @unique
+  mqttUsername          String    @unique
+  mqttPasswordHash      String
+  mqttPasswordUpdatedAt DateTime  @default(now())
+  deviceType            String    @default("DIRECT")
+  gatewayId             String?
+  gateway               Device?   @relation("GatewayChildren", fields: [gatewayId], references: [id], onDelete: SetNull)
+  children              Device[]  @relation("GatewayChildren")
+  name                  String
+  protocol              String    @default("MQTT")
+  status                String    @default("OFFLINE")
+  location              String?
+  latitude              Float?
+  longitude             Float?
+  lastSeenAt            DateTime?
+  alarms                Alarm[]
+  metrics               DeviceMetric[]
+  alarmRules            DeviceAlarmRule[]
+  logs                  DeviceLog[]
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
   @@index([tenantId])
   @@index([status])
+  @@index([deviceType])
+  @@index([gatewayId])
 }
 
 model DeviceMetric {
@@ -49,12 +66,47 @@ model DeviceMetric {
   decimals   Int      @default(2)
   accessMode String   @default("READ_ONLY")
   enabled    Boolean  @default(true)
+  ignored    Boolean  @default(false)
   sortOrder  Int      @default(0)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   @@unique([deviceId, identifier])
   @@index([deviceId])
+}
+
+model DeviceModelTemplate {
+  id          String              @id @default(uuid())
+  tenantId    String
+  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  deviceType  String              @default("DIRECT")
+  metrics     DeviceModelMetric[]
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@index([tenantId])
+  @@index([deviceType])
+}
+
+model DeviceModelMetric {
+  id         String              @id @default(uuid())
+  templateId String
+  template   DeviceModelTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  identifier String
+  name       String
+  dataType   String
+  unit       String?
+  decimals   Int                 @default(2)
+  accessMode String              @default("READ_ONLY")
+  enabled    Boolean             @default(true)
+  sortOrder  Int                 @default(0)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  @@unique([templateId, identifier])
+  @@index([templateId])
 }
 
 model DeviceAlarmRule {
@@ -106,8 +158,78 @@ model User {
   email     String?
   role      String
   status    String   @default("ACTIVE")
+  loginLogs LoginLog[]
+  operationLogs OperationLog[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([tenantId])
+}
+
+model LoginLog {
+  id        String   @id @default(uuid())
+  tenantId  String?
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  username  String
+  ip        String
+  userAgent String?
+  success   Boolean  @default(true)
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([ip])
+  @@index([createdAt])
+}
+
+model OperationLog {
+  id         String   @id @default(uuid())
+  tenantId   String?
+  tenant     Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  username   String
+  module     String
+  action     String
+  targetType String
+  targetId   String?
+  targetName String?
+  ip         String?
+  userAgent  String?
+  detail     Json?
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([module])
+  @@index([action])
+  @@index([targetType])
+  @@index([createdAt])
+}
+
+model DeviceLog {
+  id         String   @id @default(uuid())
+  tenantId   String?
+  tenant     Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  deviceId   String?
+  device     Device?  @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  deviceKey  String
+  deviceName String?
+  type       String
+  level      String   @default("INFO")
+  source     String
+  message    String
+  detail     Json?
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([deviceId])
+  @@index([deviceKey])
+  @@index([type])
+  @@index([level])
+  @@index([source])
+  @@index([createdAt])
 }

@@ -36,6 +36,7 @@ services:
   emqx:
     image: emqx/emqx:latest
     volumes:
+      - ./infra/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
       - ./infra/emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
     ports:
       - "1883:1883"
@@ -53,6 +54,11 @@ services:
       JWT_EXPIRES_IN: 7d
       PORT: 3100
       TIMESCALE_DATABASE_URL: postgresql://weikong:weikong123@timescaledb:5432/weikong_ts
+      MQTT_PUBLIC_HOST: localhost
+      MQTT_PUBLIC_PORT: 1883
+      MQTT_WS_PORT: 8083
+      MQTT_INGEST_USERNAME: platform-ingest
+      MQTT_INGEST_PASSWORD: platform-ingest-secret
     ports:
       - "3100:3100"
     depends_on:
@@ -67,9 +73,11 @@ services:
       DATABASE_URL: postgresql://weikong:weikong123@postgres:5432/weikong_iot?schema=public
       MQTT_URL: mqtt://emqx:1883
       MQTT_USERNAME: platform-ingest
+      MQTT_INGEST_PASSWORD: platform-ingest-secret
       TIMESCALE_DATABASE_URL: postgresql://weikong:weikong123@timescaledb:5432/weikong_ts
       DEVICE_OFFLINE_TIMEOUT_SECONDS: 90
       DEVICE_OFFLINE_SCAN_INTERVAL_SECONDS: 30
+      DEVICE_DISCONNECT_GRACE_SECONDS: 3
       TEMPERATURE_HIGH_THRESHOLD: 30
       HUMIDITY_HIGH_THRESHOLD: 80
       BATTERY_LOW_THRESHOLD: 20

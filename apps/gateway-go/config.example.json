@@ -1,0 +1,65 @@
+{
+  "gatewayKey": "gw-001",
+  "collectIntervalSeconds": 5,
+  "cacheFile": ".runtime/gateway-spool.jsonl",
+  "mqtt": {
+    "enabled": true,
+    "broker": "tcp://127.0.0.1:1883",
+    "clientId": "平台里网关设备的 MQTT ClientId",
+    "username": "平台里网关设备的 MQTT Username",
+    "password": "平台里网关设备的新密码"
+  },
+  "points": [
+    {
+      "deviceKey": "child-001",
+      "name": "温度",
+      "metric": "temperature",
+      "protocol": "modbus-tcp",
+      "address": "192.168.1.50:502",
+      "slaveId": 1,
+      "function": 3,
+      "register": 0,
+      "quantity": 2,
+      "dataType": "float32",
+      "byteOrder": "big",
+      "wordOrder": "normal",
+      "scale": 1,
+      "offset": 0
+    },
+    {
+      "deviceKey": "child-001",
+      "name": "运行状态",
+      "metric": "running",
+      "protocol": "modbus-tcp",
+      "address": "192.168.1.50:502",
+      "slaveId": 1,
+      "function": 1,
+      "register": 10,
+      "quantity": 1,
+      "dataType": "bool"
+    },
+    {
+      "deviceKey": "child-002",
+      "name": "压力",
+      "metric": "pressure",
+      "protocol": "modbus-rtu",
+      "address": "COM3",
+      "slaveId": 2,
+      "function": 4,
+      "register": 20,
+      "quantity": 1,
+      "dataType": "uint16",
+      "byteOrder": "big",
+      "scale": 0.01,
+      "offset": 0
+    }
+  ],
+  "forwardSlave": {
+    "enabled": false,
+    "listen": "0.0.0.0:1502"
+  },
+  "web": {
+    "enabled": true,
+    "listen": "0.0.0.0:8088"
+  }
+}

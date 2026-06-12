@@ -14,7 +14,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
   ) {}
 
-  async login(dto: LoginDto) {
+  async login(dto: LoginDto, meta: { ip: string; userAgent?: string | string[] }) {
     const account = dto.username.trim();
     const user = await this.prisma.user.findFirst({
       where: {
@@ -25,9 +25,26 @@ export class AuthService {
         ],
       },
     });
+
     if (!user || user.status !== 'ACTIVE' || !(await bcrypt.compare(dto.password, user.password))) {
+      await this.recordLoginLog({
+        username: account,
+        user,
+        ip: meta.ip,
+        userAgent: meta.userAgent,
+        success: false,
+        reason: !user ? '账号不存在' : user.status !== 'ACTIVE' ? '账号已停用' : '密码错误',
+      });
       throw new UnauthorizedException('账号或密码错误');
     }
+
+    await this.recordLoginLog({
+      username: account,
+      user,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      success: true,
+    });
     return { accessToken: this.signToken(user), user: this.toPublicUser(user) };
   }
 
@@ -91,6 +108,27 @@ export class AuthService {
       username: user.username,
       role: user.role,
       tenantId: user.tenantId,
+    });
+  }
+
+  private async recordLoginLog(options: {
+    username: string;
+    user?: User | null;
+    ip: string;
+    userAgent?: string | string[];
+    success: boolean;
+    reason?: string;
+  }) {
+    await this.prisma.loginLog.create({
+      data: {
+        username: options.username,
+        userId: options.user?.id,
+        tenantId: options.user?.tenantId,
+        ip: options.ip || 'unknown',
+        userAgent: Array.isArray(options.userAgent) ? options.userAgent.join(' ') : options.userAgent,
+        success: options.success,
+        reason: options.reason,
+      },
     });
   }
 

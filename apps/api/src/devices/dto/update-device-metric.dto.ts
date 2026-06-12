@@ -27,6 +27,10 @@ export class UpdateDeviceMetricDto {
   @IsOptional()
   enabled?: boolean;
 
+  @IsBoolean()
+  @IsOptional()
+  ignored?: boolean;
+
   @IsInt()
   @Min(0)
   @IsOptional()
