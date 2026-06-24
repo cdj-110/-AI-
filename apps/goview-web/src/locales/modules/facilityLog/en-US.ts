@@ -1,0 +1,22 @@
+export default {
+    startTime: 'Start Time',
+    endTime: 'End Time',
+    to: 'to',
+    logType: 'Log Type',
+    query: 'Query',
+    refresh: 'Refresh',
+    content: 'Content',
+    details: 'Details',
+    time: 'Time',
+    viewMessage: 'View Message',
+    messageType: 'Message Type',
+    messageStatus: 'Message Status',
+    messageTime: 'Message Time',
+    messageContent: 'Message Content',
+    success: 'Success',
+    failure: 'Failure',
+    close: 'Close',
+    attributeDownlink: 'Attribute Downlink',
+    attributeReporting: 'Attribute Reporting',
+    eventReporting: 'Event Reporting'
+}

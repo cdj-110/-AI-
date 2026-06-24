@@ -163,8 +163,23 @@ export class DevicesService implements OnModuleDestroy {
 
   async remove(actor: AuthUser, id: string) {
     const device = await this.getAccessibleDevice(actor, id);
-    await this.prisma.device.delete({ where: { id: device.id } });
-    return { message: '删除成功' };
+    return this.prisma.$transaction(async (tx) => {
+      const factoryGateway = await tx.factoryGateway.findUnique({
+        where: { deviceId: device.id },
+        select: { id: true, sn: true, hardwareId: true },
+      });
+      if (factoryGateway) {
+        await tx.factoryGateway.update({
+          where: { id: factoryGateway.id },
+          data: { status: 'UNBOUND', deviceId: null, boundAt: null },
+        });
+      }
+      await tx.device.delete({ where: { id: device.id } });
+      return {
+        message: factoryGateway ? '设备已删除，出厂网关已解除绑定' : '删除成功',
+        factoryGateway,
+      };
+    });
   }
 
   async reportStatus(actor: AuthUser, id: string, dto: ReportDeviceStatusDto) {

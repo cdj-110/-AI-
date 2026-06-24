@@ -156,9 +156,21 @@ async function submit() {
 }
 
 async function remove(device: DeviceItem) {
-  await ElMessageBox.confirm(`确定删除设备“${device.name}”吗？`, '删除确认', { type: 'warning' });
-  await apiRequest({ url: `/api/devices/${device.id}`, method: 'DELETE' });
-  ElMessage.success('设备已删除');
+  const gatewayTip = device.deviceType === 'GATEWAY'
+    ? ' 如果它来自出厂网关绑定，删除后会同时解除绑定，可重新测试绑定流程。'
+    : '';
+  await ElMessageBox.confirm(`确定删除设备“${device.name}”吗？${gatewayTip}`, '删除确认', {
+    type: 'warning',
+    confirmButtonText: '确认删除',
+    cancelButtonText: '取消',
+  });
+  const result = await apiRequest<{ message: string; factoryGateway?: { sn: string } }>({
+    url: `/api/devices/${device.id}`,
+    method: 'DELETE',
+  });
+  ElMessage.success(result.factoryGateway
+    ? `设备已删除，${result.factoryGateway.sn} 已解除绑定，可到出厂网关重置绑定码`
+    : '设备已删除');
   await loadDevices();
 }
 

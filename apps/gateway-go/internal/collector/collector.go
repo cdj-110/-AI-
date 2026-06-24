@@ -26,6 +26,10 @@ func New(protocol string) (Collector, error) {
 		return SiemensS7{}, nil
 	case "iec104":
 		return IEC104{}, nil
+	case "iec61850":
+		return IEC61850{}, nil
+	case "opcua":
+		return OPCUA{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported protocol %s", protocol)
 	}

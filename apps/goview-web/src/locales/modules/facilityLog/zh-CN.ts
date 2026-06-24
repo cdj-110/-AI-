@@ -1,0 +1,22 @@
+export default {
+    startTime: '开始时间',
+    endTime: '结束时间',
+    to: '至',
+    logType: '日志类型',
+    query: '查询',
+    refresh: '刷新',
+    content: '内容',
+    details: '详情',
+    time: '时间',
+    viewMessage: '查看消息',
+    messageType: '消息类型',
+    messageStatus: '消息状态',
+    messageTime: '消息时间',
+    messageContent: '消息内容',
+    success: '成功',
+    failure: '失败',
+    close: '关闭页面',
+    attributeDownlink: '属性下发',
+    attributeReporting: '属性上报',
+    eventReporting: '事件上报'
+}

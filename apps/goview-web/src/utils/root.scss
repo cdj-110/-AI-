@@ -1,0 +1,34 @@
+:root{
+    --page-height: calc(100vh - 4rem);//主页面高度
+    --content-height: calc(var(--page-height) - 4.3vh);//面包屑内容区域高度
+}
+
+/* ---------------------------------------------- 以下是高德地图样式 ---------------------------------------------- **/
+::-webkit-scrollbar {
+    width: 5px;
+}
+::-webkit-scrollbar-track {
+    background: #fff;
+    border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgb(205, 206, 206);
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #333;
+}
+
+::-webkit-scrollbar-corner {
+    background: #fff;
+}
+
+.amap-logo{
+    display: none;//去掉高德地图logo
+    opacity:0 !important;
+}
+.amap-copyright {
+    opacity:0;//去掉高德的版本号
+}

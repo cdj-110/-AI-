@@ -2,7 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -12,30 +16,36 @@ import (
 	"weikong-iot-platform/apps/gateway-go/internal/model"
 	gatewayruntime "weikong-iot-platform/apps/gateway-go/internal/runtime"
 	"weikong-iot-platform/apps/gateway-go/internal/state"
+	"weikong-iot-platform/apps/gateway-go/internal/storage"
 	"weikong-iot-platform/apps/gateway-go/internal/web"
 )
 
 type App struct {
-	cfg        config.Config
-	configPath string
-	cloudMu    sync.Mutex
-	cloud      *cloud.Client
-	spool      cache.Spool
-	state      *state.Store
-	runtime    *gatewayruntime.Manager
-	publishSem chan struct{}
+	cfg           config.Config
+	configPath    string
+	cloudMu       sync.Mutex
+	clouds        []*cloud.Client
+	cloudState    map[string]bool
+	spoolMu       sync.Mutex
+	spool         *cache.Spool
+	state         *state.Store
+	runtime       *gatewayruntime.Manager
+	collectSem    chan struct{}
+	configChanged chan struct{}
 }
 
 func New(cfg config.Config, configPath string) *App {
 	store := state.New(cfg)
 	manager := gatewayruntime.NewManager(cfg, store)
 	return &App{
-		cfg:        cfg,
-		configPath: configPath,
-		spool:      cache.New(cfg.CacheFile),
-		state:      store,
-		runtime:    manager,
-		publishSem: make(chan struct{}, 1),
+		cfg:           cfg,
+		configPath:    configPath,
+		cloudState:    map[string]bool{},
+		spool:         offlineSpool(cfg),
+		state:         store,
+		runtime:       manager,
+		collectSem:    make(chan struct{}, 1),
+		configChanged: make(chan struct{}, 1),
 	}
 }
 
@@ -45,16 +55,55 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.disconnectCloud()
 
 	log.Printf("gateway %s started, points=%d", a.cfg.GatewayKey, len(a.cfg.Points))
-	a.collectAndPublish(ctx)
+	go a.heartbeatLoop(ctx)
+	go a.collectAndPublish(ctx)
 	for {
-		timer := time.NewTimer(a.runtime.CollectInterval())
+		interval := a.runtime.CollectInterval()
+		if interval <= 0 {
+			interval = time.Second
+		}
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return nil
+		case <-a.configChanged:
+			timer.Stop()
+			continue
 		case <-timer.C:
-			a.collectAndPublish(ctx)
+			go a.collectAndPublish(ctx)
 		}
+	}
+}
+
+func (a *App) heartbeatLoop(ctx context.Context) {
+	a.publishGatewayHeartbeat()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.publishGatewayHeartbeat()
+		}
+	}
+}
+
+func (a *App) publishGatewayHeartbeat() {
+	a.cloudMu.Lock()
+	clients := a.connectedCloudsLocked()
+	a.cloudMu.Unlock()
+	for _, client := range clients {
+		if client.IsManual() {
+			continue
+		}
+		if err := client.PublishGatewayHeartbeat(); err != nil {
+			log.Printf("publish gateway heartbeat failed channel=%s: %v", client.Name(), err)
+			a.state.AddError("publish gateway heartbeat failed " + client.Name() + ": " + err.Error())
+			continue
+		}
+		a.state.MarkPublish()
 	}
 }
 
@@ -62,88 +111,339 @@ func (a *App) ApplyConfig(cfg config.Config) {
 	oldCfg := a.runtime.Config()
 	a.runtime.UpdateConfig(cfg)
 	a.cfg = cfg
-	if !oldCfg.MQTT.Equal(cfg.MQTT) {
+	a.spoolMu.Lock()
+	a.spool = offlineSpool(cfg)
+	a.spoolMu.Unlock()
+	if !oldCfg.MQTT.Equal(cfg.MQTT) || !oldCfg.Activation.Equal(cfg.Activation) {
 		a.syncCloud(cfg)
 	}
-}
-
-func (a *App) collectAndPublish(ctx context.Context) {
-	grouped := a.runtime.CollectOnce(ctx)
-	if len(grouped) == 0 {
-		return
-	}
 	select {
-	case a.publishSem <- struct{}{}:
-		go func() {
-			defer func() { <-a.publishSem }()
-			a.publishToCloud(grouped)
-		}()
+	case a.configChanged <- struct{}{}:
 	default:
 	}
 }
 
+func (a *App) collectAndPublish(ctx context.Context) {
+	select {
+	case a.collectSem <- struct{}{}:
+	default:
+		return
+	}
+	grouped := a.runtime.CollectOnce(ctx)
+	<-a.collectSem
+	if len(grouped) == 0 {
+		return
+	}
+	a.publishToCloud(grouped)
+}
+
 func (a *App) publishToCloud(grouped map[string]map[string]interface{}) {
-	if !a.runtime.Config().MQTT.IsEnabled() {
-		return
-	}
 	a.cloudMu.Lock()
-	defer a.cloudMu.Unlock()
-	if a.cloud == nil || !a.cloud.IsConnected() {
-		return
+	clients := a.connectedCloudsLocked()
+	a.cloudMu.Unlock()
+	if platformClient := firstPlatformClient(clients); platformClient != nil {
+		a.spoolMu.Lock()
+		_ = a.spool.DrainLimit(platformClient.PublishTelemetry, 5)
+		a.spoolMu.Unlock()
+	}
+	publishedAny := false
+	for _, client := range clients {
+		if client.IsManual() {
+			if err := client.PublishManual(grouped); err != nil {
+				log.Printf("publish attributes failed channel=%s: %v", client.Name(), err)
+				a.state.AddError("publish attributes failed " + client.Name() + ": " + err.Error())
+			} else {
+				publishedAny = true
+			}
+			continue
+		}
+
 	}
 
-	if err := a.cloud.PublishGatewayHeartbeat(); err != nil {
-		log.Printf("publish gateway heartbeat failed: %v", err)
-		a.state.AddError("publish gateway heartbeat failed: " + err.Error())
-	}
-
-	_ = a.spool.Drain(a.cloud.PublishTelemetry)
 	for deviceKey, metrics := range grouped {
 		reading := model.Reading{DeviceKey: deviceKey, Time: time.Now(), Metrics: metrics}
-		if err := a.cloud.PublishChildHeartbeat(deviceKey); err != nil {
-			log.Printf("publish child heartbeat failed device=%s: %v", deviceKey, err)
-			a.state.AddError("publish child heartbeat failed " + deviceKey + ": " + err.Error())
+		platformPublished := false
+		for _, client := range clients {
+			if client.IsManual() {
+				continue
+			}
+			if err := client.PublishChildHeartbeat(deviceKey); err != nil {
+				log.Printf("publish child heartbeat failed channel=%s device=%s: %v", client.Name(), deviceKey, err)
+				a.state.AddError("publish child heartbeat failed " + client.Name() + "/" + deviceKey + ": " + err.Error())
+			}
+			if err := client.PublishTelemetry(reading); err != nil {
+				log.Printf("publish telemetry failed channel=%s device=%s: %v", client.Name(), deviceKey, err)
+				a.state.AddError("publish telemetry failed " + client.Name() + "/" + deviceKey + ": " + err.Error())
+			} else {
+				platformPublished = true
+				publishedAny = true
+			}
 		}
-		if err := a.cloud.PublishTelemetry(reading); err != nil {
-			log.Printf("publish telemetry failed device=%s: %v", deviceKey, err)
-			a.state.AddError("publish telemetry failed " + deviceKey + ": " + err.Error())
-			if cacheErr := a.spool.Append(reading); cacheErr != nil {
+		if !platformPublished {
+			a.spoolMu.Lock()
+			cacheErr := a.spool.Append(reading)
+			a.spoolMu.Unlock()
+			if cacheErr != nil && cacheErr != cache.ErrDisabled {
 				log.Printf("append spool failed: %v", cacheErr)
 				a.state.AddError("append spool failed: " + cacheErr.Error())
 			}
-		} else {
-			a.state.MarkPublish()
 		}
 	}
+	if publishedAny {
+		a.state.MarkPublish()
+	}
+}
+
+func offlineSpool(cfg config.Config) *cache.Spool {
+	if !cfg.OfflineCache.Enabled {
+		return cache.Disabled()
+	}
+	device, ok := storage.Find(cfg.OfflineCache.StoragePath)
+	if !ok {
+		log.Printf("offline cache disabled: removable storage %q is not mounted", cfg.OfflineCache.StoragePath)
+		return cache.Disabled()
+	}
+	maxBytes := int64(cfg.OfflineCache.MaxSizeMB) * 1024 * 1024
+	path := filepath.Join(device.MountPath, ".weikong", "gateway-spool.jsonl")
+	log.Printf("offline cache enabled path=%s max=%dMB free=%dMB", path, cfg.OfflineCache.MaxSizeMB, device.FreeBytes/1024/1024)
+	return cache.NewGuarded(path, maxBytes, func() bool {
+		current, mounted := storage.Find(device.MountPath)
+		return mounted && current.Device == device.Device
+	})
+}
+
+func firstPlatformClient(clients []*cloud.Client) *cloud.Client {
+	for _, client := range clients {
+		if !client.IsManual() {
+			return client
+		}
+	}
+	return nil
 }
 
 func (a *App) syncCloud(cfg config.Config) {
 	a.cloudMu.Lock()
 	defer a.cloudMu.Unlock()
-	if a.cloud != nil {
-		a.cloud.Disconnect()
-		a.cloud = nil
-		a.state.SetMQTTConnected(false)
+	for _, client := range a.clouds {
+		client.Disconnect()
 	}
-	if !cfg.MQTT.IsEnabled() {
-		log.Printf("mqtt disabled, cloud publish skipped")
+	a.clouds = nil
+	a.cloudState = map[string]bool{}
+	a.state.ResetMQTTChannels(cfg)
+
+	if cfg.Activation.IsReady() && cfg.Activation.Broker != "" {
+		client := cloud.NewActivationMQTT(cfg, a.setCloudChannelConnected("activation"))
+		a.clouds = append(a.clouds, client)
+		if err := client.Connect(); err != nil {
+			log.Printf("activation mqtt connect failed: %v", err)
+			a.state.AddError("activation mqtt connect failed: " + err.Error())
+		} else {
+			a.setCloudChannelConnectedLocked("activation", client.IsConnected())
+			if err := client.SubscribeRemoteConfig(a.applyRemoteConfig, a.remoteConfigSnapshot); err != nil {
+				log.Printf("subscribe remote config failed channel=activation: %v", err)
+			}
+		}
+	} else if cfg.Activation.IsReady() && cfg.Activation.Broker == "" {
+		log.Printf("activation channel broker is empty, skipped")
+	} else if cfg.Activation.IsEnabled() && cfg.Activation.File != "" {
+		log.Printf("activation channel not ready, cloud publish skipped")
+	}
+
+	if cfg.MQTT.IsEnabled() {
+		client := cloud.NewManualMQTT(cfg, a.setCloudChannelConnected("manual"))
+		a.clouds = append(a.clouds, client)
+		if err := client.Connect(); err != nil {
+			log.Printf("manual mqtt connect failed: %v", err)
+			a.state.AddError("manual mqtt connect failed: " + err.Error())
+		} else {
+			a.setCloudChannelConnectedLocked("manual", client.IsConnected())
+			if !cfg.Activation.IsReady() {
+				if err := client.SubscribeRemoteConfig(a.applyRemoteConfig, a.remoteConfigSnapshot); err != nil {
+					log.Printf("subscribe remote config failed channel=manual: %v", err)
+				}
+			}
+		}
+	}
+
+	if len(a.clouds) == 0 {
+		log.Printf("all mqtt channels disabled, cloud publish skipped")
+	}
+}
+
+func (a *App) applyRemoteConfig(command cloud.RemoteConfigCommand) cloud.RemoteConfigResult {
+	current := a.runtime.Config()
+	desired, err := mergeRemoteConfig(current, command.Config)
+	if err != nil {
+		return cloud.RemoteConfigResult{Status: "FAILED", Message: "配置 JSON 无效: " + err.Error()}
+	}
+	raw, err := json.Marshal(desired)
+	if err != nil {
+		return cloud.RemoteConfigResult{Status: "FAILED", Message: "配置序列化失败: " + err.Error()}
+	}
+	validated, err := config.Parse(raw)
+	if err != nil {
+		return cloud.RemoteConfigResult{Status: "FAILED", Message: "配置校验失败: " + err.Error()}
+	}
+	oldRaw, err := os.ReadFile(a.configPath)
+	if err != nil {
+		return cloud.RemoteConfigResult{Status: "FAILED", Message: "读取当前配置失败: " + err.Error()}
+	}
+	if err := os.WriteFile(a.configPath+".remote.bak", oldRaw, 0600); err != nil {
+		return cloud.RemoteConfigResult{Status: "FAILED", Message: "备份当前配置失败: " + err.Error()}
+	}
+	if err := config.Save(a.configPath, validated); err != nil {
+		return cloud.RemoteConfigResult{Status: "FAILED", Message: "保存远程配置失败: " + err.Error()}
+	}
+	a.ApplyConfig(validated)
+	a.runtime.CollectOnce(context.Background())
+	log.Printf("remote config applied task=%s version=%d", command.TaskID, command.Version)
+	return cloud.RemoteConfigResult{Status: "APPLIED", Message: "配置已校验、备份并热加载"}
+}
+
+func mergeRemoteConfig(current config.Config, patchRaw json.RawMessage) (config.Config, error) {
+	currentRaw, err := json.Marshal(current)
+	if err != nil {
+		return config.Config{}, err
+	}
+	var base map[string]interface{}
+	var patch map[string]interface{}
+	if err := json.Unmarshal(currentRaw, &base); err != nil {
+		return config.Config{}, err
+	}
+	if err := json.Unmarshal(patchRaw, &patch); err != nil {
+		return config.Config{}, err
+	}
+	if patch == nil {
+		return config.Config{}, fmt.Errorf("配置必须是 JSON 对象")
+	}
+	// Connectivity and local storage settings stay under local control.
+	for _, key := range []string{"gatewayKey", "activation", "mqtt", "web", "networkPorts", "offlineCache"} {
+		delete(patch, key)
+	}
+	preserveRemoteSecrets(base, patch)
+	mergeConfigObject(base, patch)
+	mergedRaw, err := json.Marshal(base)
+	if err != nil {
+		return config.Config{}, err
+	}
+	return config.Parse(mergedRaw)
+}
+
+func (a *App) remoteConfigSnapshot() interface{} {
+	cfg := a.runtime.Config()
+	devices := append([]config.DeviceConfig(nil), cfg.Devices...)
+	for index := range devices {
+		devices[index].Points = append([]config.PointConfig(nil), devices[index].Points...)
+		if devices[index].Password != "" {
+			devices[index].Password = "***"
+		}
+		for pointIndex := range devices[index].Points {
+			if devices[index].Points[pointIndex].Password != "" {
+				devices[index].Points[pointIndex].Password = "***"
+			}
+		}
+	}
+	return map[string]interface{}{
+		"collectIntervalSeconds": cfg.CollectIntervalSeconds,
+		"serialPorts":            cfg.SerialPorts,
+		"devices":                devices,
+		"forwardSlave":           cfg.ForwardSlave,
+	}
+}
+
+func preserveRemoteSecrets(base, patch map[string]interface{}) {
+	baseDevices, baseOK := base["devices"].([]interface{})
+	patchDevices, patchOK := patch["devices"].([]interface{})
+	if !baseOK || !patchOK {
 		return
 	}
-	client := cloud.NewMQTT(cfg, a.state.SetMQTTConnected)
-	a.cloud = client
-	if err := client.Connect(); err != nil {
-		log.Printf("mqtt connect failed: %v", err)
-		a.state.SetMQTTConnected(false)
-		a.state.AddError("mqtt connect failed: " + err.Error())
+	baseByKey := map[string]map[string]interface{}{}
+	for _, item := range baseDevices {
+		if device, ok := item.(map[string]interface{}); ok {
+			baseByKey[fmt.Sprint(device["deviceKey"])] = device
+		}
+	}
+	for _, item := range patchDevices {
+		device, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		current := baseByKey[fmt.Sprint(device["deviceKey"])]
+		if current == nil {
+			continue
+		}
+		preserveMaskedValue(current, device, "password")
+		currentPoints, _ := current["points"].([]interface{})
+		patchPoints, _ := device["points"].([]interface{})
+		pointsByMetric := map[string]map[string]interface{}{}
+		for _, pointItem := range currentPoints {
+			if point, ok := pointItem.(map[string]interface{}); ok {
+				pointsByMetric[fmt.Sprint(point["metric"])] = point
+			}
+		}
+		for _, pointItem := range patchPoints {
+			point, ok := pointItem.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if currentPoint := pointsByMetric[fmt.Sprint(point["metric"])]; currentPoint != nil {
+				preserveMaskedValue(currentPoint, point, "password")
+			}
+		}
+	}
+}
+
+func preserveMaskedValue(current, patch map[string]interface{}, key string) {
+	if patch[key] == "***" {
+		patch[key] = current[key]
+	}
+}
+
+func mergeConfigObject(target, patch map[string]interface{}) {
+	for key, value := range patch {
+		patchObject, patchIsObject := value.(map[string]interface{})
+		targetObject, targetIsObject := target[key].(map[string]interface{})
+		if patchIsObject && targetIsObject {
+			mergeConfigObject(targetObject, patchObject)
+			continue
+		}
+		target[key] = value
 	}
 }
 
 func (a *App) disconnectCloud() {
 	a.cloudMu.Lock()
 	defer a.cloudMu.Unlock()
-	if a.cloud != nil {
-		a.cloud.Disconnect()
-		a.cloud = nil
-		a.state.SetMQTTConnected(false)
+	for _, client := range a.clouds {
+		client.Disconnect()
 	}
+	a.clouds = nil
+	a.cloudState = map[string]bool{}
+	a.state.SetMQTTChannelConnected("activation", false)
+	a.state.SetMQTTChannelConnected("manual", false)
+}
+
+func (a *App) connectedCloudsLocked() []*cloud.Client {
+	var clients []*cloud.Client
+	for _, client := range a.clouds {
+		if client.IsConnected() {
+			clients = append(clients, client)
+		}
+	}
+	return clients
+}
+
+func (a *App) setCloudChannelConnected(name string) func(bool) {
+	return func(connected bool) {
+		go func() {
+			a.cloudMu.Lock()
+			defer a.cloudMu.Unlock()
+			a.setCloudChannelConnectedLocked(name, connected)
+		}()
+	}
+}
+
+func (a *App) setCloudChannelConnectedLocked(name string, connected bool) {
+	a.cloudState[name] = connected
+	a.state.SetMQTTChannelConnected(name, connected)
 }

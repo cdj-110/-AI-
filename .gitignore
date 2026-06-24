@@ -1,6 +1,7 @@
 node_modules/
 .npm-cache/
 dist/
+apps/goview-web/Web/
 .env
 *.log
 api.local.log
@@ -8,4 +9,5 @@ api.local.log
 .runtime/
 /go.mod
 apps/gateway-go/config.local.json
+apps/gateway-go/activation.local.json
 apps/gateway-go/gateway-*

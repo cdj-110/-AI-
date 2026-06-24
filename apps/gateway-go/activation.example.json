@@ -1,0 +1,6 @@
+{
+  "hardwareId": "工厂扫码读取到的 HardwareId，可省略并由网关启动时读取",
+  "sn": "WK2026A1B2C3D4",
+  "deviceSecret": "云平台生成的 DeviceSecret",
+  "broker": "tcp://127.0.0.1:1883"
+}

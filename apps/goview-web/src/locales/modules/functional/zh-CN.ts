@@ -1,0 +1,22 @@
+export default {
+    bindModel: '绑定模型',
+    selectCreatedModel: '选择已创建的模型',
+    noModelAlert: '设备未绑定模型，在进行模型绑定后，在进行功能属性配置',
+    updateDeviceModel: '更新设备模型',
+    propertyNamePlaceholder: '属性名称/标识符',
+    query: '查询',
+    refresh: '刷新',
+    propertyName: '属性名称',
+    propertyType: '属性类型',
+    readOnly: '只读',
+    writeOnly: '只写',
+    readWrite: '读写',
+    identifier: '标识符',
+    propertyValue: '属性值',
+    on: '开',
+    off: '关',
+    updateTime: '更新时间',
+    historicalData: '历史数据',
+    operation: '操作',
+    sendData: '下发数据'
+}

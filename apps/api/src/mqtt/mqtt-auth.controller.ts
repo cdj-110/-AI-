@@ -40,6 +40,20 @@ export class MqttAuthController {
         : { result: 'deny' };
     }
 
+    if (username.startsWith('factory:')) {
+      const hardwareId = username.slice('factory:'.length).trim().toUpperCase();
+      if (!hardwareId || body.clientid !== `factory_${hardwareId}`) return { result: 'deny' };
+      const gateway = await this.prisma.factoryGateway.findUnique({ where: { hardwareId } });
+      if (!gateway || gateway.status === 'DISABLED') return { result: 'deny' };
+      try {
+        return (await bcrypt.compare(password, gateway.deviceSecretHash))
+          ? { result: 'allow', is_superuser: false }
+          : { result: 'deny' };
+      } catch {
+        return { result: 'deny' };
+      }
+    }
+
     // 真实设备必须同时匹配 username、clientId 和 bcrypt 密码，避免串用其他设备凭证。
     const device = await this.prisma.device.findUnique({ where: { mqttUsername: username } });
     if (!device || body.clientid !== device.mqttClientId) return { result: 'deny' };
@@ -68,6 +82,13 @@ export class MqttAuthController {
       return this.canIngest(action, topic) ? { result: 'allow' } : { result: 'deny' };
     }
 
+    if (username.startsWith('factory:')) {
+      const hardwareId = username.slice('factory:'.length).trim().toUpperCase();
+      return action === 'publish' && topic === `weikong/factory/${hardwareId}/heartbeat`
+        ? { result: 'allow' }
+        : this.canFactoryGatewayPublishBoundDevice(hardwareId, action, topic);
+    }
+
     const device = await this.prisma.device.findUnique({
       where: { mqttUsername: username },
       select: { id: true, deviceKey: true, deviceType: true, mqttClientId: true },
@@ -79,6 +100,10 @@ export class MqttAuthController {
       `weikong/devices/${device.deviceKey}/heartbeat`,
       `weikong/devices/${device.deviceKey}/telemetry`,
     ]);
+    if (device.deviceType === 'GATEWAY') {
+      if (action === 'subscribe' && [`weikong/gateways/${device.deviceKey}/config/set`, `weikong/gateways/${device.deviceKey}/config/get`].includes(topic)) return { result: 'allow' };
+      if (action === 'publish' && [`weikong/gateways/${device.deviceKey}/config/reply`, `weikong/gateways/${device.deviceKey}/config/reported`].includes(topic)) return { result: 'allow' };
+    }
     if (action !== 'publish') return { result: 'deny' };
     if (allowedPublishTopics.has(topic)) return { result: 'allow' };
     if (await this.canGatewayPublishChild(device, topic)) return { result: 'allow' };
@@ -86,15 +111,19 @@ export class MqttAuthController {
   }
 
   private canIngest(action: string, topic: string) {
-    // ingest 只允许订阅平台需要消费的系统事件和设备上报主题。
+    if (action === 'publish') return /^weikong\/gateways\/[^/]+\/config\/(set|get)$/.test(topic);
+    // 平台内部客户端订阅设备上报和远程配置回执。
     if (action !== 'subscribe') return false;
     return topic === '$SYS/#'
       || topic === '$SYS/brokers/+/clients/+/connected'
       || topic === '$SYS/brokers/+/clients/+/disconnected'
       || topic === 'weikong/devices/+/heartbeat'
       || topic === 'weikong/devices/+/telemetry'
+      || topic === 'weikong/factory/+/heartbeat'
       || topic === 'weikong/gateways/+/children/+/heartbeat'
-      || topic === 'weikong/gateways/+/children/+/telemetry';
+      || topic === 'weikong/gateways/+/children/+/telemetry'
+      || topic === 'weikong/gateways/+/config/reply'
+      || topic === 'weikong/gateways/+/config/reported';
   }
 
   private async canGatewayPublishChild(
@@ -116,5 +145,23 @@ export class MqttAuthController {
       select: { id: true },
     });
     return Boolean(child);
+  }
+
+  private async canFactoryGatewayPublishBoundDevice(hardwareId: string, action: string, topic: string): Promise<MqttDecision> {
+    const factoryGateway = await this.prisma.factoryGateway.findUnique({
+      where: { hardwareId },
+      include: { device: { select: { id: true, deviceKey: true, deviceType: true } } },
+    });
+    const device = factoryGateway?.device;
+    if (!device || factoryGateway.status !== 'BOUND') return { result: 'deny' };
+    if (device.deviceType === 'GATEWAY') {
+      if (action === 'subscribe' && [`weikong/gateways/${device.deviceKey}/config/set`, `weikong/gateways/${device.deviceKey}/config/get`].includes(topic)) return { result: 'allow' };
+      if (action === 'publish' && [`weikong/gateways/${device.deviceKey}/config/reply`, `weikong/gateways/${device.deviceKey}/config/reported`].includes(topic)) return { result: 'allow' };
+    }
+    if (action !== 'publish') return { result: 'deny' };
+    if (topic === `weikong/devices/${device.deviceKey}/heartbeat` || topic === `weikong/devices/${device.deviceKey}/telemetry`) {
+      return { result: 'allow' };
+    }
+    return (await this.canGatewayPublishChild(device, topic)) ? { result: 'allow' } : { result: 'deny' };
   }
 }

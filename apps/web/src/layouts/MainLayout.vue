@@ -15,6 +15,7 @@ interface DeviceItem {
 
 interface StatusToast {
   id: number;
+  alarmId?: string;
   title: string;
   message: string;
   status: string;
@@ -59,8 +60,10 @@ let alarmAggregateToastId = 0;
 let lastAlarmSoundAt = 0;
 const activeMenu = computed(() => {
   if (route.path.startsWith('/devices')) return '/devices';
+  if (route.path.startsWith('/factory-gateways')) return '/factory-gateways';
   if (route.path.startsWith('/system-status')) return '/system-status';
   if (route.path.startsWith('/device-map')) return '/device-map';
+  if (route.path.startsWith('/cloud-scada')) return '/cloud-scada';
   if (route.path.startsWith('/model-templates')) return '/model-templates';
   if (route.path.startsWith('/alarms')) return '/alarms';
   if (route.path.startsWith('/login-logs')) return '/login-logs';
@@ -184,7 +187,11 @@ function addStatusReminder(device: DeviceItem) {
 }
 
 function addAlarmToast(alarm: AlarmEvent) {
-  if (alarm.status !== 'OPEN') return;
+  if (alarm.status !== 'OPEN') {
+    statusToasts.value = statusToasts.value.filter((toast) => toast.alarmId !== alarm.id);
+    return;
+  }
+  if (statusToasts.value.some((toast) => toast.alarmId === alarm.id)) return;
   const now = Date.now();
   if (now - alarmWindowStart > alarmWindowMs) {
     alarmWindowStart = now;
@@ -196,6 +203,7 @@ function addAlarmToast(alarm: AlarmEvent) {
   if (alarmWindowCount <= alarmIndividualLimit) {
     const toast: StatusToast = {
       id: ++statusToastId,
+      alarmId: alarm.id,
       title: `${alarmLevelLabel(alarm.level)}告警`,
       message: alarm.deviceName ? `${alarm.deviceName}：${alarm.message}` : alarm.message,
       status: 'ALARM',
@@ -408,9 +416,17 @@ onBeforeUnmount(() => {
           <el-icon><Connection /></el-icon>
           <span>设备管理</span>
         </router-link>
+        <router-link v-if="userStore.userInfo?.role !== 'TENANT_USER'" to="/factory-gateways" class="menu-item" :class="{ active: activeMenu === '/factory-gateways' }">
+          <el-icon><Connection /></el-icon>
+          <span>出厂网关</span>
+        </router-link>
         <router-link to="/device-map" class="menu-item" :class="{ active: activeMenu === '/device-map' }">
           <el-icon><Location /></el-icon>
           <span>设备地图</span>
+        </router-link>
+        <router-link to="/cloud-scada" class="menu-item" :class="{ active: activeMenu === '/cloud-scada' }">
+          <el-icon><Monitor /></el-icon>
+          <span>云组态</span>
         </router-link>
         <router-link to="/model-templates" class="menu-item" :class="{ active: activeMenu === '/model-templates' }">
           <el-icon><Connection /></el-icon>

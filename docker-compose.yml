@@ -54,9 +54,11 @@ services:
       JWT_EXPIRES_IN: 7d
       PORT: 3100
       TIMESCALE_DATABASE_URL: postgresql://weikong:weikong123@timescaledb:5432/weikong_ts
-      MQTT_PUBLIC_HOST: localhost
-      MQTT_PUBLIC_PORT: 1883
+      MQTT_PUBLIC_HOST: ${MQTT_PUBLIC_HOST:-127.0.0.1}
+      MQTT_PUBLIC_PORT: ${MQTT_PUBLIC_PORT:-1883}
       MQTT_WS_PORT: 8083
+      MQTT_URL: mqtt://emqx:1883
+      MQTT_USERNAME: platform-ingest
       MQTT_INGEST_USERNAME: platform-ingest
       MQTT_INGEST_PASSWORD: platform-ingest-secret
     ports:

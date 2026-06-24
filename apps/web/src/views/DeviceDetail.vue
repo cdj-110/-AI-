@@ -37,6 +37,13 @@ interface TelemetryEvent {
   metrics: Record<string, unknown>;
 }
 
+interface MetricSnapshot {
+  key: string;
+  value: unknown;
+  time: string;
+  deviceKey: string;
+}
+
 interface TrendPoint {
   time: string;
   value: number;
@@ -102,6 +109,73 @@ interface DeviceLogItem {
   createdAt: string;
 }
 
+interface RemoteConfigTask {
+  id: string;
+  version: number;
+  status: 'PENDING' | 'SENT' | 'APPLIED' | 'FAILED' | 'TIMEOUT';
+  config: Record<string, unknown>;
+  createdBy: string;
+  error?: string;
+  sentAt?: string;
+  completedAt?: string;
+  createdAt: string;
+}
+
+interface RemoteConfigDiffRow {
+  field: string;
+  label: string;
+  before: string;
+  after: string;
+}
+
+interface RemotePointConfig {
+  deviceKey: string;
+  name: string;
+  metric: string;
+  protocol: string;
+  address: string;
+  slaveId: number;
+  area?: string;
+  dbNumber?: number;
+  objectRef?: string;
+  fc?: string;
+  nodeId?: string;
+  function: number;
+  register: number;
+  quantity: number;
+  dataType: string;
+  byteOrder: string;
+  wordOrder: string;
+  bitIndex?: number | null;
+  scale: number;
+  offset: number;
+  unit?: string;
+  decimals?: number;
+  password?: string;
+}
+
+interface RemoteDeviceConfig {
+  deviceKey: string;
+  name: string;
+  protocol: string;
+  address: string;
+  slaveId: number;
+  interfaceType?: string;
+  interfaceName?: string;
+  plcModel?: string;
+  rack?: number;
+  slot?: number;
+  iedName?: string;
+  username?: string;
+  password?: string;
+  points: RemotePointConfig[];
+}
+
+interface RemoteConfigSnapshot {
+  collectIntervalSeconds?: number;
+  devices?: RemoteDeviceConfig[];
+}
+
 const route = useRoute();
 const router = useRouter();
 const userStore = useUserStore();
@@ -109,6 +183,7 @@ const device = ref<DeviceItem>();
 const telemetryItems = ref<TelemetryEvent[]>([]);
 const recentTelemetryItems = ref<TelemetryEvent[]>([]);
 const streamStatus = ref<'CONNECTING' | 'LIVE' | 'DISCONNECTED'>('CONNECTING');
+const detailTab = ref<'monitor' | 'config' | 'logs'>('monitor');
 const trendChartRef = ref<HTMLDivElement>();
 const selectedMetric = ref('');
 const selectedTrendRange = ref('1m');
@@ -130,6 +205,22 @@ const deviceLogs = ref<DeviceLogItem[]>([]);
 const deviceLogsTotal = ref(0);
 const deviceLogsLoading = ref(false);
 const rotatingCredentials = ref(false);
+const remoteConfigTasks = ref<RemoteConfigTask[]>([]);
+const remoteConfigText = ref('{\n  "collectIntervalSeconds": 1\n}');
+const remoteConfigMode = ref<'basic' | 'advanced'>('basic');
+const remoteConfigForm = reactive({ collectIntervalSeconds: 1 });
+const remoteDevices = ref<RemoteDeviceConfig[]>([]);
+const remoteSnapshot = ref<RemoteConfigSnapshot>();
+const remoteSnapshotAt = ref<string>();
+const remoteSnapshotLoading = ref(false);
+const remoteConfigLoading = ref(false);
+const sendingRemoteConfig = ref(false);
+const remoteConfigInitialized = ref(false);
+const remoteConfigConfirmVisible = ref(false);
+const pendingRemoteConfig = ref<Record<string, unknown>>();
+const remoteConfigDiffRows = ref<RemoteConfigDiffRow[]>([]);
+const remoteProtocols = ['modbus-tcp', 'modbus-rtu', 'siemens-s7', 'opcua', 'iec104', 'iec61850'];
+const remoteDataTypes = ['bool', 'uint16', 'int16', 'uint32', 'int32', 'float32'];
 const ruleForm = reactive({ identifier: '', operator: '>', threshold: 0, hysteresis: 0, level: 'WARNING' });
 const importForm = reactive({ templateDeviceId: '', modelTemplateId: '', overwrite: false });
 const deviceLogQuery = reactive({ page: 1, pageSize: 6, type: '' });
@@ -143,6 +234,7 @@ let recentTelemetryTimer: ReturnType<typeof setInterval> | undefined;
 let settingsRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 let trendRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 let telemetryFlushTimer: ReturnType<typeof setTimeout> | undefined;
+let remoteConfigTimer: ReturnType<typeof setInterval> | undefined;
 let trendChart: echarts.ECharts | undefined;
 const pendingTelemetryEvents: TelemetryEvent[] = [];
 const RECENT_TELEMETRY_LIMIT = 20;
@@ -158,18 +250,28 @@ const trendRanges = [
 ];
 
 const latest = computed(() => telemetryItems.value[0]);
+const latestMetrics = computed(() => {
+  const snapshots = new Map<string, MetricSnapshot>();
+  for (const item of telemetryItems.value) {
+    for (const [key, value] of Object.entries(item.metrics)) {
+      if (!key.trim() || snapshots.has(key)) continue;
+      snapshots.set(key, { key, value, time: item.time, deviceKey: item.deviceKey });
+    }
+  }
+  return snapshots;
+});
 const canManage = computed(() => userStore.userInfo?.role !== 'TENANT_USER');
 const importableTemplates = computed(() => modelTemplates.value.filter((template) => template.id !== String(route.params.id)));
 const importableModelTemplates = computed(() => deviceModelTemplates.value.filter((template) => template.deviceType === device.value?.deviceType));
 const visibleTelemetryItems = computed(() => recentTelemetryItems.value.filter((item) => Object.keys(item.metrics).some((key) => key.trim() && metricEnabled(key))));
-const metrics = computed(() => Object.entries(latest.value?.metrics ?? {})
-  // 卡片只展示未忽略的字段，顺序和设备配置中的 sortOrder 保持一致。
-  .filter(([key]) => key.trim() && metricEnabled(key))
-  .map(([key, value]) => ({ key, value }))
+const metrics = computed(() => [...latestMetrics.value.values()]
+  // 卡片只展示未忽略字段，顺序跟随设备配置中的排序。
+  .filter((snapshot) => metricEnabled(snapshot.key))
+  .map((snapshot) => ({ key: snapshot.key, value: snapshot.value, time: snapshot.time, deviceKey: snapshot.deviceKey }))
   .sort((left, right) => metricSortOrder(left.key) - metricSortOrder(right.key)));
 const sortedDeviceMetrics = computed(() => {
-  // 配置列表优先展示当前正在上报的字段，再按卡片排序，方便维护实时字段。
-  const latestKeys = new Set(Object.keys(latest.value?.metrics ?? {}));
+  // 配置列表优先展示当前正在上报的字段，方便维护实时点位。
+  const latestKeys = new Set(latestMetrics.value.keys());
   return [...deviceMetrics.value].sort((left, right) => {
     const leftLive = latestKeys.has(left.identifier);
     const rightLive = latestKeys.has(right.identifier);
@@ -197,17 +299,22 @@ const numericMetricKeys = computed(() => {
   });
 });
 const selectedMetricValues = computed(() => trendPoints.value.map((point) => point.value).filter((value) => Number.isFinite(value)));
+const selectedMetricLatestValue = computed(() => {
+  const value = latestMetrics.value.get(selectedMetric.value)?.value;
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+});
 const selectedMetricStats = computed(() => {
   const values = selectedMetricValues.value;
-  if (!values.length) return { latest: '-', min: '-', max: '-', avg: '-' };
+  if (!values.length && selectedMetricLatestValue.value === undefined) return { latest: '-', min: '-', max: '-', avg: '-' };
   const total = values.reduce((sum, value) => sum + value, 0);
   return {
-    latest: formatNumber(values[0]),
-    min: formatNumber(Math.min(...values)),
-    max: formatNumber(Math.max(...values)),
-    avg: formatNumber(total / values.length),
+    latest: selectedMetricLatestValue.value === undefined ? '-' : formatNumber(selectedMetricLatestValue.value),
+    min: values.length ? formatNumber(Math.min(...values)) : '-',
+    max: values.length ? formatNumber(Math.max(...values)) : '-',
+    avg: values.length ? formatNumber(total / values.length) : '-',
   };
 });
+const latestTelemetryTime = computed(() => latest.value?.time ?? device.value?.lastSeenAt);
 const telemetryState = computed(() => {
   // 区分“浏览器实时通道状态”和“设备是否真的在线/上报”，避免文案误导。
   if (streamStatus.value === 'CONNECTING') return { dot: 'connecting', label: '正在连接实时通道' };
@@ -270,6 +377,13 @@ function displayValue(value: unknown, key?: string) {
   return typeof value === 'object' ? JSON.stringify(value) : String(value);
 }
 
+function formatDateTime(value?: string) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
 function addTelemetry(event: TelemetryEvent) {
   event = sanitizeTelemetryEvent(event);
   if (!Object.keys(event.metrics).length) return;
@@ -289,16 +403,14 @@ function flushTelemetryEvents() {
   const events = pendingTelemetryEvents.splice(0);
   if (!events.length) return;
   const newestFirst = [...events].reverse();
-  telemetryItems.value = [newestFirst[0], ...telemetryItems.value].slice(0, RECENT_TELEMETRY_LIMIT);
+  mergeTelemetryItems(newestFirst);
   prependRecentTelemetryItems(newestFirst);
   if (events.some((item) => Object.keys(item.metrics).some((key) => !deviceMetrics.value.some((metric) => metric.identifier === key)))) {
     if (settingsRefreshTimer) clearTimeout(settingsRefreshTimer);
     settingsRefreshTimer = setTimeout(() => void loadSettings(undefined, true), 600);
   }
-  const latestEvent = newestFirst[0];
   if (device.value) {
     device.value.status = 'ONLINE';
-    device.value.lastSeenAt = latestEvent.time;
   }
   if (events.some((item) => item.metrics[selectedMetric.value] !== undefined)) scheduleTrendRefresh();
 }
@@ -361,6 +473,259 @@ async function rotateCredentials() {
   } finally {
     rotatingCredentials.value = false;
   }
+}
+
+async function loadRemoteConfigs(id = String(route.params.id), silentError = false) {
+  remoteConfigLoading.value = true;
+  try {
+    const tasks = await apiRequest<RemoteConfigTask[]>({
+      url: `/api/devices/${id}/remote-configs`,
+      method: 'GET',
+      silentError,
+    });
+    if (id === String(route.params.id)) {
+      remoteConfigTasks.value = tasks;
+      if (!remoteConfigInitialized.value) {
+        const interval = latestAppliedRemoteValue('collectIntervalSeconds', tasks);
+        if (typeof interval === 'number' && Number.isFinite(interval)) remoteConfigForm.collectIntervalSeconds = interval;
+        remoteConfigInitialized.value = true;
+      }
+    }
+  } finally {
+    remoteConfigLoading.value = false;
+  }
+}
+
+async function loadCurrentRemoteConfig(id = String(route.params.id), silentError = false) {
+  remoteSnapshotLoading.value = true;
+  try {
+    const data = await apiRequest<{ config: RemoteConfigSnapshot; reportedAt?: string; stale?: boolean }>({
+      url: `/api/devices/${id}/remote-configs/current`,
+      method: 'GET',
+      silentError,
+    });
+    if (id !== String(route.params.id)) return;
+    remoteSnapshot.value = data.config;
+    remoteSnapshotAt.value = data.reportedAt;
+    remoteConfigForm.collectIntervalSeconds = Number(data.config.collectIntervalSeconds || 1);
+    remoteDevices.value = JSON.parse(JSON.stringify(data.config.devices ?? [])) as RemoteDeviceConfig[];
+  } finally {
+    remoteSnapshotLoading.value = false;
+  }
+}
+
+function prepareRemoteConfig() {
+  let configPatch: Record<string, unknown>;
+  if (remoteConfigMode.value === 'basic') {
+    if (!remoteSnapshot.value) {
+      ElMessage.error('请先读取网关当前配置');
+      return;
+    }
+    if (!validateRemoteDevices()) return;
+    configPatch = {
+      collectIntervalSeconds: remoteConfigForm.collectIntervalSeconds,
+      devices: remoteDevices.value,
+    };
+  } else {
+    try {
+      const parsed = JSON.parse(remoteConfigText.value) as unknown;
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error();
+      configPatch = parsed as Record<string, unknown>;
+    } catch {
+      ElMessage.error('请输入有效的 JSON 对象');
+      return;
+    }
+  }
+  pendingRemoteConfig.value = configPatch;
+  remoteConfigDiffRows.value = buildRemoteConfigDiff(configPatch);
+  remoteConfigConfirmVisible.value = true;
+}
+
+async function sendRemoteConfig() {
+  if (!pendingRemoteConfig.value) return;
+  sendingRemoteConfig.value = true;
+  try {
+    await apiRequest<RemoteConfigTask>({
+      url: `/api/devices/${String(route.params.id)}/remote-configs`,
+      method: 'POST',
+      data: { config: pendingRemoteConfig.value },
+    });
+    remoteConfigConfirmVisible.value = false;
+    pendingRemoteConfig.value = undefined;
+    ElMessage.success('远程配置已下发，正在等待网关回执');
+    await loadRemoteConfigs();
+  } finally {
+    sendingRemoteConfig.value = false;
+  }
+}
+
+async function retryRemoteConfig(task: RemoteConfigTask) {
+  await apiRequest<RemoteConfigTask>({
+    url: `/api/devices/${String(route.params.id)}/remote-configs/${task.id}/retry`,
+    method: 'POST',
+  });
+  ElMessage.success(`版本 V${task.version} 已重新下发`);
+  await loadRemoteConfigs();
+}
+
+function useRemoteConfig(task: RemoteConfigTask) {
+  remoteConfigText.value = JSON.stringify(task.config, null, 2);
+  remoteConfigMode.value = 'advanced';
+}
+
+function latestAppliedRemoteValue(field: string, tasks = remoteConfigTasks.value) {
+  return tasks.find((task) => task.status === 'APPLIED' && task.config[field] !== undefined)?.config[field];
+}
+
+function displayRemoteConfigValue(value: unknown) {
+  if (value === undefined) return '平台暂无记录';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function buildRemoteConfigDiff(configPatch: Record<string, unknown>): RemoteConfigDiffRow[] {
+  const labels: Record<string, string> = { collectIntervalSeconds: '采集周期（秒）', devices: '设备与点位' };
+  return Object.entries(configPatch).map(([field, value]) => ({
+    field,
+    label: labels[field] ?? field,
+    before: field === 'devices' ? remoteDeviceSummary(remoteSnapshot.value?.devices) : displayRemoteConfigValue(remoteSnapshot.value?.[field as keyof RemoteConfigSnapshot] ?? latestAppliedRemoteValue(field)),
+    after: field === 'devices' ? remoteDeviceChangeSummary(remoteSnapshot.value?.devices ?? [], value as RemoteDeviceConfig[]) : displayRemoteConfigValue(value),
+  }));
+}
+
+function remoteDeviceSummary(devices?: RemoteDeviceConfig[]) {
+  const items = devices ?? [];
+  return `${items.length} 台设备 / ${items.reduce((total, item) => total + (item.points?.length ?? 0), 0)} 个点位`;
+}
+
+function remoteDeviceChangeSummary(before: RemoteDeviceConfig[], after: RemoteDeviceConfig[]) {
+  const beforeDevices = new Map(before.map((item) => [item.deviceKey, item]));
+  const afterDevices = new Map(after.map((item) => [item.deviceKey, item]));
+  const addedDevices = after.filter((item) => !beforeDevices.has(item.deviceKey)).length;
+  const removedDevices = before.filter((item) => !afterDevices.has(item.deviceKey)).length;
+  const changedDevices = after.filter((item) => {
+    const previous = beforeDevices.get(item.deviceKey);
+    if (!previous) return false;
+    const { points: previousPoints, ...previousDevice } = previous;
+    const { points: nextPoints, ...nextDevice } = item;
+    return JSON.stringify(previousDevice) !== JSON.stringify(nextDevice);
+  }).length;
+  let addedPoints = 0;
+  let removedPoints = 0;
+  let changedPoints = 0;
+  for (const device of after) {
+    const previous = beforeDevices.get(device.deviceKey);
+    if (!previous) {
+      addedPoints += device.points?.length ?? 0;
+      continue;
+    }
+    const previousPoints = new Map((previous.points ?? []).map((point) => [point.metric, point]));
+    const nextPoints = new Map((device.points ?? []).map((point) => [point.metric, point]));
+    addedPoints += (device.points ?? []).filter((point) => !previousPoints.has(point.metric)).length;
+    removedPoints += (previous.points ?? []).filter((point) => !nextPoints.has(point.metric)).length;
+    changedPoints += (device.points ?? []).filter((point) => {
+      const oldPoint = previousPoints.get(point.metric);
+      return oldPoint && JSON.stringify(oldPoint) !== JSON.stringify(point);
+    }).length;
+  }
+  for (const device of before) {
+    if (!afterDevices.has(device.deviceKey)) removedPoints += device.points?.length ?? 0;
+  }
+  return `${remoteDeviceSummary(after)}；设备 +${addedDevices} / -${removedDevices} / 改${changedDevices}；点位 +${addedPoints} / -${removedPoints} / 改${changedPoints}`;
+}
+
+function createRemoteDevice(): RemoteDeviceConfig {
+  const index = remoteDevices.value.length + 1;
+  return { deviceKey: `device-${String(index).padStart(3, '0')}`, name: `设备${index}`, protocol: 'modbus-tcp', address: '', slaveId: 1, interfaceType: 'network', interfaceName: '', points: [] };
+}
+
+function createRemotePoint(device: RemoteDeviceConfig): RemotePointConfig {
+  const index = device.points.length + 1;
+  return { deviceKey: device.deviceKey, name: `点位${index}`, metric: `point_${index}`, protocol: device.protocol, address: device.address, slaveId: device.slaveId, function: 3, register: 0, quantity: 1, dataType: 'uint16', byteOrder: 'big', wordOrder: 'normal', scale: 1, offset: 0, decimals: 0 };
+}
+
+function addRemoteDevice() {
+  remoteDevices.value.push(createRemoteDevice());
+}
+
+function copyRemoteDevice(index: number) {
+  const copy = JSON.parse(JSON.stringify(remoteDevices.value[index])) as RemoteDeviceConfig;
+  copy.deviceKey = `${copy.deviceKey}-copy`;
+  copy.name = `${copy.name}副本`;
+  copy.points.forEach((point) => { point.deviceKey = copy.deviceKey; });
+  remoteDevices.value.splice(index + 1, 0, copy);
+}
+
+function removeRemoteDevice(index: number) {
+  remoteDevices.value.splice(index, 1);
+}
+
+function addRemotePoint(device: RemoteDeviceConfig) {
+  device.points.push(createRemotePoint(device));
+}
+
+function copyRemotePoint(device: RemoteDeviceConfig, index: number) {
+  const copy = JSON.parse(JSON.stringify(device.points[index])) as RemotePointConfig;
+  copy.name = `${copy.name}副本`;
+  copy.metric = `${copy.metric}_copy`;
+  device.points.splice(index + 1, 0, copy);
+}
+
+function removeRemotePoint(device: RemoteDeviceConfig, index: number) {
+  device.points.splice(index, 1);
+}
+
+function syncRemoteDevice(device: RemoteDeviceConfig) {
+  device.points.forEach((point) => {
+    point.deviceKey = device.deviceKey;
+    point.protocol = device.protocol;
+    point.address = device.address;
+    point.slaveId = device.slaveId;
+  });
+}
+
+function validateRemoteDevices() {
+  const deviceKeys = new Set<string>();
+  for (const item of remoteDevices.value) {
+    item.deviceKey = item.deviceKey.trim();
+    item.name = item.name.trim();
+    if (!item.deviceKey || !item.name || !item.protocol || !item.address) {
+      ElMessage.error('设备编号、名称、协议和地址不能为空');
+      return false;
+    }
+    if (deviceKeys.has(item.deviceKey)) {
+      ElMessage.error(`设备编号重复：${item.deviceKey}`);
+      return false;
+    }
+    deviceKeys.add(item.deviceKey);
+    syncRemoteDevice(item);
+    const metrics = new Set<string>();
+    for (const point of item.points) {
+      point.name = point.name.trim();
+      point.metric = point.metric.trim();
+      if (!point.name || !point.metric) {
+        ElMessage.error(`设备 ${item.name} 存在名称或标识符为空的点位`);
+        return false;
+      }
+      if (metrics.has(point.metric)) {
+        ElMessage.error(`设备 ${item.name} 的点位标识符重复：${point.metric}`);
+        return false;
+      }
+      metrics.add(point.metric);
+    }
+  }
+  return true;
+}
+
+function remoteConfigStatusLabel(status: RemoteConfigTask['status']) {
+  return { PENDING: '待发送', SENT: '等待回执', APPLIED: '已生效', FAILED: '失败', TIMEOUT: '超时' }[status];
+}
+
+function remoteConfigStatusType(status: RemoteConfigTask['status']) {
+  if (status === 'APPLIED') return 'success';
+  if (status === 'FAILED') return 'danger';
+  if (status === 'TIMEOUT') return 'warning';
+  return 'info';
 }
 
 async function loadSettings(id = String(route.params.id), silentError = false) {
@@ -567,11 +932,10 @@ async function removeRule(rule: AlarmRule) {
 function togglePause() {
   paused.value = !paused.value;
   if (!paused.value && pausedQueue.value.length) {
-    telemetryItems.value = [pausedQueue.value[0], ...telemetryItems.value].slice(0, RECENT_TELEMETRY_LIMIT);
+    mergeTelemetryItems(pausedQueue.value);
     prependRecentTelemetryItems(pausedQueue.value);
     if (device.value) {
       device.value.status = 'ONLINE';
-      device.value.lastSeenAt = pausedQueue.value[0].time;
     }
     pausedQueue.value = [];
   }
@@ -656,7 +1020,7 @@ function normalizeTelemetryItems(deviceKey: string, items: Array<{ time: string;
 
 function telemetryRowKey(row?: TelemetryEvent) {
   if (!row) return '';
-  return `${row.deviceKey}-${row.time}`;
+  return `${row.deviceKey}-${row.time}-${JSON.stringify(row.metrics)}`;
 }
 
 function telemetryTimeValue(item: TelemetryEvent) {
@@ -667,8 +1031,8 @@ function sameTelemetryRows(left: TelemetryEvent[], right: TelemetryEvent[]) {
   return left.map(telemetryRowKey).join('|') === right.map(telemetryRowKey).join('|');
 }
 
-function stableRecentTelemetryRows(items: TelemetryEvent[]) {
-  const oldByKey = new Map(recentTelemetryItems.value.map((item) => [telemetryRowKey(item), item]));
+function stableTelemetryRows(items: TelemetryEvent[], oldItems: TelemetryEvent[]) {
+  const oldByKey = new Map(oldItems.map((item) => [telemetryRowKey(item), item]));
   const uniqueByKey = new Map<string, TelemetryEvent>();
   for (const item of items) {
     const key = telemetryRowKey(item);
@@ -679,8 +1043,14 @@ function stableRecentTelemetryRows(items: TelemetryEvent[]) {
     .slice(0, RECENT_TELEMETRY_LIMIT);
 }
 
+function mergeTelemetryItems(items: TelemetryEvent[]) {
+  const nextRows = stableTelemetryRows([...items, ...telemetryItems.value], telemetryItems.value);
+  if (sameTelemetryRows(telemetryItems.value, nextRows)) return;
+  telemetryItems.value = nextRows;
+}
+
 function mergeRecentTelemetryItems(items: TelemetryEvent[]) {
-  const nextRows = stableRecentTelemetryRows(items);
+  const nextRows = stableTelemetryRows(items, recentTelemetryItems.value);
   if (sameTelemetryRows(recentTelemetryItems.value, nextRows)) return;
   recentTelemetryItems.value = nextRows;
 }
@@ -701,6 +1071,7 @@ async function loadPage(id = String(route.params.id)) {
   const telemetryData = await telemetryPromise;
   if (id !== String(route.params.id)) return;
   telemetryItems.value = normalizeTelemetryItems(telemetryData.deviceKey, telemetryData.items);
+  mergeTelemetryItems([]);
   mergeRecentTelemetryItems(telemetryItems.value);
 }
 
@@ -712,8 +1083,8 @@ async function refreshRecentTelemetry(id = String(route.params.id), silentError 
   });
   if (id !== String(route.params.id)) return;
   const items = normalizeTelemetryItems(data.deviceKey, data.items);
+  mergeTelemetryItems(items);
   mergeRecentTelemetryItems(items);
-  if (items[0]) telemetryItems.value = [items[0], ...telemetryItems.value].slice(0, RECENT_TELEMETRY_LIMIT);
 }
 
 async function loadDeviceLogs(id = String(route.params.id), silentError = false) {
@@ -794,6 +1165,13 @@ function resetPageState() {
   credentials.value = undefined;
   deviceLogs.value = [];
   deviceLogsTotal.value = 0;
+  remoteConfigTasks.value = [];
+  remoteDevices.value = [];
+  remoteSnapshot.value = undefined;
+  remoteSnapshotAt.value = undefined;
+  remoteConfigInitialized.value = false;
+  pendingRemoteConfig.value = undefined;
+  remoteConfigConfirmVisible.value = false;
   deviceLogQuery.page = 1;
   deviceLogQuery.type = '';
   selectedMetric.value = '';
@@ -805,6 +1183,7 @@ async function loadDeviceDetail(id = String(route.params.id)) {
   resetPageState();
   await Promise.all([loadPage(id), loadSettings(id), loadCredentials(id), loadDeviceLogs(id, true)]);
   if (id !== String(route.params.id)) return;
+  if (device.value?.deviceType === 'GATEWAY') await Promise.all([loadRemoteConfigs(id, true), loadCurrentRemoteConfig(id, true)]);
   selectedMetric.value = numericMetricKeys.value[0] ?? '';
   await loadTrend(id);
   void connectStream(id);
@@ -822,6 +1201,9 @@ onMounted(async () => {
   window.addEventListener('device-status-change', handleDeviceStatusEvent);
   statusTimer = setInterval(() => void refreshDevice(), 30000);
   recentTelemetryTimer = setInterval(() => void refreshRecentTelemetry(), 2000);
+  remoteConfigTimer = setInterval(() => {
+    if (device.value?.deviceType === 'GATEWAY') void loadRemoteConfigs(undefined, true);
+  }, 5000);
   window.addEventListener('resize', resizeChart);
   await loadDeviceDetail();
 });
@@ -833,6 +1215,7 @@ onBeforeUnmount(() => {
   if (settingsRefreshTimer) clearTimeout(settingsRefreshTimer);
   if (trendRefreshTimer) clearTimeout(trendRefreshTimer);
   if (telemetryFlushTimer) clearTimeout(telemetryFlushTimer);
+  if (remoteConfigTimer) clearInterval(remoteConfigTimer);
   window.removeEventListener('device-status-change', handleDeviceStatusEvent);
   window.removeEventListener('resize', resizeChart);
   trendChart?.dispose();
@@ -866,15 +1249,147 @@ watch(() => route.params.id, (id, oldId) => {
       </div>
     </div>
 
-    <section class="device-summary">
+    <nav class="detail-tabs" aria-label="设备详情分区">
+      <button :class="{ active: detailTab === 'monitor' }" type="button" @click="detailTab = 'monitor'">
+        实时监控
+        <span>{{ metrics.length }}</span>
+      </button>
+      <button :class="{ active: detailTab === 'config' }" type="button" @click="detailTab = 'config'">
+        设备配置
+      </button>
+      <button v-if="canManage" :class="{ active: detailTab === 'logs' }" type="button" @click="detailTab = 'logs'">
+        设备日志
+        <span>{{ deviceLogsTotal }}</span>
+      </button>
+    </nav>
+
+    <section v-show="detailTab === 'config'" class="device-summary detail-section-first">
       <div><span>设备状态</span><el-tag :type="statusType(device?.status)">{{ statusLabel(device?.status) }}</el-tag></div>
       <div><span>设备类型</span><strong>{{ deviceTypeLabel(device?.deviceType) }}</strong></div>
       <div v-if="device?.deviceType === 'GATEWAY_CHILD'"><span>所属网关</span><strong>{{ device.gateway?.name || '-' }}</strong></div>
       <div><span>安装位置</span><strong>{{ device?.location || '-' }}</strong></div>
-      <div><span>最后上报</span><strong>{{ device?.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : '-' }}</strong></div>
+      <div><span>最近遥测</span><strong>{{ formatDateTime(latestTelemetryTime) }}</strong></div>
     </section>
 
-    <section v-if="canManage" class="table-panel device-log-panel priority-log-panel">
+    <section v-if="device?.deviceType === 'GATEWAY'" v-show="detailTab === 'config'" class="remote-config-panel">
+      <div class="section-heading">
+        <div><h2>远程配置</h2><p>通过 MQTT 向在线网关下发局部 JSON 配置，并跟踪网关执行回执。</p></div>
+        <el-button :icon="RefreshRight" :loading="remoteConfigLoading" @click="loadRemoteConfigs()">刷新状态</el-button>
+      </div>
+      <el-alert class="remote-config-tip" type="warning" :closable="false" show-icon>
+        <template #title>网关编号、激活信息、MQTT、Web 监听、网口和离线缓存属于本地保护项，远程下发时会忽略。</template>
+      </el-alert>
+      <div v-if="canManage" class="remote-config-editor">
+        <el-segmented v-model="remoteConfigMode" :options="[{ label: '常用配置', value: 'basic' }, { label: '高级 JSON', value: 'advanced' }]" class="remote-config-mode" />
+        <div v-if="remoteConfigMode === 'basic'" class="remote-basic-form">
+          <div class="remote-field-card">
+            <div>
+              <strong>采集周期</strong>
+              <p>网关每隔多少秒执行一次全部点位采集，推荐 1–10 秒。</p>
+            </div>
+            <div class="remote-interval-input">
+              <el-input-number v-model="remoteConfigForm.collectIntervalSeconds" :min="1" :max="3600" :step="1" step-strictly controls-position="right" />
+              <span>秒</span>
+            </div>
+          </div>
+          <div class="remote-device-heading">
+            <div>
+              <strong>设备与点位</strong>
+              <p>基于网关实时回传配置编辑。展开设备行可维护该设备的采集点位。</p>
+              <small>读取于 {{ formatDateTime(remoteSnapshotAt) }}</small>
+            </div>
+            <div>
+              <el-button :icon="RefreshRight" :loading="remoteSnapshotLoading" @click="loadCurrentRemoteConfig()">重新读取</el-button>
+              <el-button type="primary" :icon="Plus" @click="addRemoteDevice">新增设备</el-button>
+            </div>
+          </div>
+          <el-table v-loading="remoteSnapshotLoading" :data="remoteDevices" row-key="deviceKey" empty-text="网关当前没有采集设备" class="remote-device-table">
+            <el-table-column type="expand" width="48">
+              <template #default="{ row: remoteDevice }">
+                <div class="remote-point-panel">
+                  <div class="remote-device-extra">
+                    <label><span>所属接口</span><el-input v-model="remoteDevice.interfaceName" placeholder="如 网口1 / Serial1" /></label>
+                    <template v-if="remoteDevice.protocol === 'siemens-s7'">
+                      <label><span>PLC 型号</span><el-select v-model="remoteDevice.plcModel"><el-option label="S7-200 SMART" value="s7-200-smart" /><el-option label="S7-1200/1500" value="s7-1200" /></el-select></label>
+                      <label><span>Rack</span><el-input-number v-model="remoteDevice.rack" :min="0" controls-position="right" /></label>
+                      <label><span>Slot</span><el-input-number v-model="remoteDevice.slot" :min="0" controls-position="right" /></label>
+                    </template>
+                    <template v-if="remoteDevice.protocol === 'opcua'">
+                      <label><span>用户名</span><el-input v-model="remoteDevice.username" placeholder="留空为匿名" /></label>
+                      <label><span>密码</span><el-input v-model="remoteDevice.password" type="password" show-password /></label>
+                    </template>
+                    <label v-if="remoteDevice.protocol === 'iec61850'"><span>IED 名称</span><el-input v-model="remoteDevice.iedName" /></label>
+                  </div>
+                  <div class="remote-point-heading"><strong>{{ remoteDevice.name }} 的点位</strong><el-button size="small" type="primary" plain :icon="Plus" @click="addRemotePoint(remoteDevice)">新增点位</el-button></div>
+                  <el-table :data="remoteDevice.points" size="small" empty-text="暂无点位">
+                    <el-table-column label="名称" min-width="130"><template #default="{ row }"><el-input v-model="row.name" /></template></el-table-column>
+                    <el-table-column label="标识符" min-width="140"><template #default="{ row }"><el-input v-model="row.metric" /></template></el-table-column>
+                    <el-table-column label="协议地址" min-width="245">
+                      <template #default="{ row }">
+                        <div v-if="remoteDevice.protocol === 'opcua'" class="remote-inline-fields"><el-input v-model="row.nodeId" placeholder="NodeId" /></div>
+                        <div v-else-if="remoteDevice.protocol === 'iec61850'" class="remote-inline-fields"><el-input v-model="row.objectRef" placeholder="对象引用" /><el-input v-model="row.fc" placeholder="FC" /></div>
+                        <div v-else-if="remoteDevice.protocol === 'siemens-s7'" class="remote-inline-fields"><el-select v-model="row.area"><el-option v-for="area in ['V', 'DB', 'M', 'I', 'Q']" :key="area" :label="area" :value="area" /></el-select><el-input-number v-model="row.register" :min="0" controls-position="right" /></div>
+                        <div v-else class="remote-inline-fields"><el-select v-model="row.function"><el-option v-for="fc in [1, 2, 3, 4]" :key="fc" :label="`FC${fc}`" :value="fc" /></el-select><el-input-number v-model="row.register" :min="0" controls-position="right" /></div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="数据类型" min-width="130"><template #default="{ row }"><el-select v-model="row.dataType"><el-option v-for="type in remoteDataTypes" :key="type" :label="type" :value="type" /></el-select></template></el-table-column>
+                    <el-table-column label="数量" width="105"><template #default="{ row }"><el-input-number v-model="row.quantity" :min="1" :controls="false" /></template></el-table-column>
+                    <el-table-column label="倍率" width="115"><template #default="{ row }"><el-input-number v-model="row.scale" :controls="false" /></template></el-table-column>
+                    <el-table-column label="偏移" width="115"><template #default="{ row }"><el-input-number v-model="row.offset" :controls="false" /></template></el-table-column>
+                    <el-table-column label="单位" width="100"><template #default="{ row }"><el-input v-model="row.unit" /></template></el-table-column>
+                    <el-table-column label="操作" width="120" fixed="right"><template #default="{ $index }"><el-button link type="primary" @click="copyRemotePoint(remoteDevice, $index)">复制</el-button><el-button link type="danger" @click="removeRemotePoint(remoteDevice, $index)">删除</el-button></template></el-table-column>
+                  </el-table>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="设备编号" min-width="145"><template #default="{ row }"><el-input v-model="row.deviceKey" @change="syncRemoteDevice(row)" /></template></el-table-column>
+            <el-table-column label="设备名称" min-width="145"><template #default="{ row }"><el-input v-model="row.name" /></template></el-table-column>
+            <el-table-column label="协议" min-width="145"><template #default="{ row }"><el-select v-model="row.protocol" @change="syncRemoteDevice(row)"><el-option v-for="protocol in remoteProtocols" :key="protocol" :label="protocol" :value="protocol" /></el-select></template></el-table-column>
+            <el-table-column label="地址" min-width="190"><template #default="{ row }"><el-input v-model="row.address" placeholder="IP:端口 / COM口" @change="syncRemoteDevice(row)" /></template></el-table-column>
+            <el-table-column label="从站/公共地址" width="145"><template #default="{ row }"><el-input-number v-model="row.slaveId" :min="0" :max="255" controls-position="right" @change="syncRemoteDevice(row)" /></template></el-table-column>
+            <el-table-column label="点位" width="75"><template #default="{ row }">{{ row.points?.length ?? 0 }}</template></el-table-column>
+            <el-table-column label="操作" width="120" fixed="right"><template #default="{ $index }"><el-button link type="primary" @click="copyRemoteDevice($index)">复制</el-button><el-button link type="danger" @click="removeRemoteDevice($index)">删除</el-button></template></el-table-column>
+          </el-table>
+        </div>
+        <div v-else class="remote-json-editor">
+          <el-input v-model="remoteConfigText" type="textarea" :autosize="{ minRows: 5, maxRows: 14 }" spellcheck="false" placeholder="请输入 JSON 配置补丁" />
+          <p>高级模式适合批量修改设备和点位；数组字段会整体替换，例如 <code>devices</code>、<code>points</code>。</p>
+        </div>
+        <div class="remote-config-actions">
+          <span>点击后会先展示本次配置差异，不会直接下发。</span>
+          <el-button type="primary" :disabled="remoteConfigMode === 'basic' && !remoteSnapshot" @click="prepareRemoteConfig">预览并下发</el-button>
+        </div>
+      </div>
+      <el-table v-loading="remoteConfigLoading" :data="remoteConfigTasks" empty-text="暂无远程配置任务" class="remote-config-table">
+        <el-table-column label="版本" width="80"><template #default="{ row }">V{{ row.version }}</template></el-table-column>
+        <el-table-column label="状态" width="110"><template #default="{ row }"><el-tag :type="remoteConfigStatusType(row.status)">{{ remoteConfigStatusLabel(row.status) }}</el-tag></template></el-table-column>
+        <el-table-column prop="createdBy" label="操作人" width="130" />
+        <el-table-column label="下发时间" min-width="180"><template #default="{ row }">{{ formatDateTime(row.sentAt || row.createdAt) }}</template></el-table-column>
+        <el-table-column label="完成时间" min-width="180"><template #default="{ row }">{{ formatDateTime(row.completedAt) }}</template></el-table-column>
+        <el-table-column prop="error" label="结果" min-width="220" show-overflow-tooltip />
+        <el-table-column label="操作" width="150" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="useRemoteConfig(row)">复用</el-button>
+            <el-button v-if="canManage && ['FAILED', 'TIMEOUT'].includes(row.status)" link type="primary" @click="retryRemoteConfig(row)">重试</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <el-dialog v-model="remoteConfigConfirmVisible" title="确认远程配置" width="min(680px, 94vw)" :close-on-click-modal="!sendingRemoteConfig">
+      <el-alert type="info" :closable="false" show-icon title="确认后配置将通过 MQTT 下发，网关校验通过后立即热加载。" />
+      <el-table :data="remoteConfigDiffRows" class="remote-diff-table">
+        <el-table-column prop="label" label="配置项" min-width="150" />
+        <el-table-column prop="before" label="当前已知值" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="after" label="下发值" min-width="180" show-overflow-tooltip />
+      </el-table>
+      <template #footer>
+        <el-button :disabled="sendingRemoteConfig" @click="remoteConfigConfirmVisible = false">取消</el-button>
+        <el-button type="primary" :loading="sendingRemoteConfig" @click="sendRemoteConfig">确认下发</el-button>
+      </template>
+    </el-dialog>
+
+    <section v-if="canManage" v-show="detailTab === 'logs'" class="table-panel device-log-panel detail-section-first">
       <div class="section-heading">
         <div><h2>设备日志</h2><p>当前设备的上线、离线和 MQTT 连接事件，排查链路时优先看这里</p></div>
         <div class="device-log-actions">
@@ -888,7 +1403,7 @@ watch(() => route.params.id, (id, oldId) => {
         </div>
       </div>
       <el-table v-loading="deviceLogsLoading" :data="deviceLogs" empty-text="暂无设备日志">
-        <el-table-column label="时间" width="180"><template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template></el-table-column>
+        <el-table-column label="时间" width="180"><template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template></el-table-column>
         <el-table-column label="类型" width="120"><template #default="{ row }"><el-tag :type="deviceLogTypeTag(row.type)">{{ deviceLogTypeLabel(row.type) }}</el-tag></template></el-table-column>
         <el-table-column prop="source" label="来源" width="130" />
         <el-table-column prop="message" label="内容" min-width="220" show-overflow-tooltip />
@@ -899,7 +1414,7 @@ watch(() => route.params.id, (id, oldId) => {
       </div>
     </section>
 
-    <section v-if="device?.deviceType === 'GATEWAY_CHILD' && device.gateway" class="relation-panel">
+    <section v-if="device?.deviceType === 'GATEWAY_CHILD' && device.gateway" v-show="detailTab === 'config'" class="relation-panel">
       <div class="section-heading">
         <div><h2>所属网关</h2><p>子设备绑定的上级网关状态会随设备上下线实时刷新</p></div>
       </div>
@@ -909,11 +1424,11 @@ watch(() => route.params.id, (id, oldId) => {
           <code>{{ device.gateway.deviceKey }}</code>
         </div>
         <el-tag :type="statusType(device.gateway.status)">{{ statusLabel(device.gateway.status) }}</el-tag>
-        <span>{{ device.gateway.lastSeenAt ? new Date(device.gateway.lastSeenAt).toLocaleString() : '暂无上报' }}</span>
+        <span>{{ formatDateTime(device.gateway.lastSeenAt) }}</span>
       </div>
     </section>
 
-    <section v-if="device?.deviceType === 'GATEWAY'" class="relation-panel">
+    <section v-if="device?.deviceType === 'GATEWAY'" v-show="detailTab === 'config'" class="relation-panel">
       <div class="section-heading">
         <div><h2>子设备</h2><p>网关使用自己的 MQTT 凭证代发下列子设备心跳和遥测</p></div>
       </div>
@@ -924,19 +1439,19 @@ watch(() => route.params.id, (id, oldId) => {
         <el-table-column prop="deviceKey" label="设备编号" min-width="150" />
         <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag></template></el-table-column>
         <el-table-column prop="location" label="位置" min-width="140" />
-        <el-table-column label="最后上报" min-width="180"><template #default="{ row }">{{ row.lastSeenAt ? new Date(row.lastSeenAt).toLocaleString() : '-' }}</template></el-table-column>
+        <el-table-column label="最后上报" min-width="180"><template #default="{ row }">{{ formatDateTime(row.lastSeenAt) }}</template></el-table-column>
         <el-table-column label="心跳 Topic" min-width="300"><template #default="{ row }"><code class="topic-code">{{ childHeartbeatTopic(row.deviceKey) }}</code></template></el-table-column>
         <el-table-column label="遥测 Topic" min-width="300"><template #default="{ row }"><code class="topic-code">{{ childTelemetryTopic(row.deviceKey) }}</code></template></el-table-column>
       </el-table>
     </section>
 
-    <el-alert class="topic-tip" type="info" :closable="false" show-icon>
+    <el-alert v-show="detailTab === 'config'" class="topic-tip" type="info" :closable="false" show-icon>
       <template #title>
         当前设备遥测主题：<code>weikong/devices/{{ device?.deviceKey }}/telemetry</code>
       </template>
     </el-alert>
 
-    <el-collapse v-if="credentials" class="mqtt-collapse">
+    <el-collapse v-if="credentials" v-show="detailTab === 'config'" class="mqtt-collapse">
       <el-collapse-item name="mqtt">
         <template #title>
           <div class="mqtt-summary">
@@ -956,7 +1471,7 @@ watch(() => route.params.id, (id, oldId) => {
             <div><span>Client ID</span><code>{{ credentials.clientId }}</code></div>
             <div><span>Username</span><code>{{ credentials.username }}</code></div>
             <div><span>Password</span><code>{{ credentials.password || '已隐藏，重置后显示新密码' }}</code></div>
-            <div><span>更新时间</span><strong>{{ new Date(credentials.passwordUpdatedAt).toLocaleString() }}</strong></div>
+            <div><span>更新时间</span><strong>{{ formatDateTime(credentials.passwordUpdatedAt) }}</strong></div>
           </div>
           <div class="topic-list">
             <div><span>心跳主题</span><code>{{ credentials.heartbeatTopic }}</code></div>
@@ -966,7 +1481,7 @@ watch(() => route.params.id, (id, oldId) => {
       </el-collapse-item>
     </el-collapse>
 
-    <section class="metrics-section">
+    <section v-show="detailTab === 'monitor'" class="metrics-section detail-section-first">
       <div class="section-heading">
         <div><h2>实时指标</h2><p>设备推送新的标识符后会自动生成对应卡片</p></div>
         <div class="monitor-actions">
@@ -997,7 +1512,7 @@ watch(() => route.params.id, (id, oldId) => {
       <el-empty v-else description="等待设备推送遥测数据" />
     </section>
 
-    <section class="chart-panel">
+    <section v-show="detailTab === 'monitor'" class="chart-panel">
       <div class="section-heading trend-heading">
         <div class="trend-title"><h2>实时趋势</h2><p>按时间范围聚合显示数值变化</p></div>
         <div class="trend-controls">
@@ -1017,10 +1532,10 @@ watch(() => route.params.id, (id, oldId) => {
       <el-empty v-else description="暂无可绘制的数值指标" />
     </section>
 
-    <section class="table-panel history">
+    <section v-show="detailTab === 'monitor'" class="table-panel history">
       <div class="section-heading"><div><h2>最近上报</h2><p>固定展示最新 20 条；第 21 条进入时，最早一条会自动移出</p></div></div>
       <el-table :data="visibleTelemetryItems" :row-key="telemetryRowKey" empty-text="暂无可展示的遥测数据">
-        <el-table-column label="上报时间" width="190"><template #default="{ row }">{{ new Date(row.time).toLocaleString() }}</template></el-table-column>
+        <el-table-column label="上报时间" width="190"><template #default="{ row }">{{ formatDateTime(row.time) }}</template></el-table-column>
         <el-table-column label="设备" width="150"><template #default="{ row }">{{ row.deviceKey }}</template></el-table-column>
         <el-table-column label="指标"><template #default="{ row }">{{ formatMetrics(row.metrics) }}</template></el-table-column>
       </el-table>
@@ -1090,6 +1605,12 @@ watch(() => route.params.id, (id, oldId) => {
 .live-state { color: #64748b; font-size: 13px; }
 .settings-button { margin-left: 12px; }
 .settings-button.secondary { margin-left: 4px; }
+.detail-tabs { display: flex; gap: 6px; margin: 18px 0; padding: 4px; border: 1px solid #dfe7f1; border-radius: 12px; background: #f7f9fc; }
+.detail-tabs button { display: inline-flex; min-width: 126px; height: 38px; align-items: center; justify-content: center; gap: 7px; padding: 0 18px; border: 1px solid transparent; border-radius: 9px; color: #475569; background: transparent; cursor: pointer; transition: all 0.18s ease; }
+.detail-tabs button:hover { color: #2563eb; background: #fff; }
+.detail-tabs button.active { border-color: #bfdbfe; color: #1677ff; background: #fff; box-shadow: 0 4px 12px rgb(37 99 235 / 8%); }
+.detail-tabs button span { display: inline-flex; min-width: 20px; height: 20px; align-items: center; justify-content: center; padding: 0 6px; border-radius: 999px; color: #64748b; background: #eaf0f7; font-size: 12px; }
+.detail-tabs button.active span { color: #1677ff; background: #eaf4ff; }
 .dot { display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: #94a3b8; }
 .dot.live { background: #22c55e; box-shadow: 0 0 0 4px #dcfce7; }
 .dot.connecting, .dot.idle { background: #f59e0b; }
@@ -1099,6 +1620,37 @@ watch(() => route.params.id, (id, oldId) => {
 .device-summary span { color: #94a3b8; }
 .device-summary strong { overflow: hidden; color: #111827; text-overflow: ellipsis; white-space: nowrap; }
 .relation-panel { margin-top: 18px; padding: 20px; border: 1px solid #e9eef5; border-radius: 12px; background: #fff; }
+.remote-config-panel { margin-top: 18px; padding: 20px; border: 1px solid #dbeafe; border-radius: 12px; background: #fff; box-shadow: 0 12px 30px rgb(37 99 235 / 5%); }
+.remote-config-tip { margin-top: 14px; }
+.remote-config-editor { margin-top: 14px; }
+.remote-config-mode { margin-bottom: 14px; }
+.remote-basic-form { padding: 16px; border: 1px solid #e5edf7; border-radius: 10px; background: #f8fafc; }
+.remote-field-card { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.remote-field-card strong { color: #111827; font-size: 14px; }
+.remote-field-card p, .remote-json-editor p { margin: 6px 0 0; color: #94a3b8; font-size: 12px; }
+.remote-interval-input { display: flex; flex: 0 0 auto; align-items: center; gap: 9px; color: #64748b; font-size: 13px; }
+.remote-interval-input :deep(.el-input-number) { width: 150px; }
+.remote-device-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-top: 20px; padding-top: 18px; border-top: 1px solid #e2e8f0; }
+.remote-device-heading strong { color: #111827; font-size: 14px; }
+.remote-device-heading p { margin: 5px 0; color: #64748b; font-size: 12px; }
+.remote-device-heading small { color: #94a3b8; }
+.remote-device-table { margin-top: 12px; border: 1px solid #e5eaf1; border-radius: 9px; }
+.remote-device-table :deep(.el-input-number) { width: 100%; }
+.remote-point-panel { padding: 14px 16px 18px 62px; background: #f8fafc; }
+.remote-device-extra { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 9px; background: #fff; }
+.remote-device-extra label span { display: block; margin-bottom: 5px; color: #64748b; font-size: 12px; }
+.remote-device-extra :deep(.el-input-number) { width: 100%; }
+.remote-point-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.remote-point-heading strong { color: #334155; font-size: 13px; }
+.remote-inline-fields { display: flex; gap: 6px; }
+.remote-inline-fields :deep(.el-select) { min-width: 82px; }
+.remote-inline-fields :deep(.el-input-number) { width: 135px; }
+.remote-json-editor { padding: 14px; border: 1px solid #e5edf7; border-radius: 10px; background: #f8fafc; }
+.remote-config-editor :deep(textarea) { font-family: Consolas, monospace; line-height: 1.55; }
+.remote-config-actions { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 10px; }
+.remote-config-actions span { color: #94a3b8; font-size: 12px; }
+.remote-config-table { margin-top: 18px; }
+.remote-diff-table { margin-top: 14px; }
 .relation-panel .section-heading { margin-bottom: 16px; }
 .gateway-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 16px; align-items: center; padding: 14px 16px; border: 1px solid #edf1f5; border-radius: 10px; background: #fafcff; cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
 .gateway-card:hover { border-color: #2563eb; box-shadow: 0 0 0 3px rgb(37 99 235 / 10%); }
@@ -1126,6 +1678,7 @@ code { color: #2563eb; font-family: Consolas, monospace; }
 .mqtt-grid strong { color: #111827; font-size: 13px; }
 .topic-list { display: grid; gap: 12px; margin-top: 12px; }
 .metrics-section { margin-top: 18px; padding: 20px; border: 1px solid #e9eef5; border-radius: 12px; background: #fff; }
+.metrics-section.detail-section-first, .device-log-panel.detail-section-first { margin-top: 0; }
 .chart-panel { margin-top: 18px; padding: 20px; border: 1px solid #e9eef5; border-radius: 12px; background: #fff; }
 .trend-chart { height: 280px; margin-top: 12px; }
 .trend-heading { gap: 16px; align-items: flex-start; }
@@ -1174,5 +1727,5 @@ h2 { margin: 0; color: #111827; font-size: 16px; }
 .model-import { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 0 0 14px; padding: 12px; border: 1px solid #edf1f5; border-radius: 10px; background: #f8fafc; }
 .template-select { min-width: 310px; flex: 1; }
 .metric-number { width: 100%; }
-@media (max-width: 700px) { .device-summary { flex-direction: column; gap: 12px; } .gateway-card { grid-template-columns: 1fr; } .trend-stats { grid-template-columns: repeat(2, 1fr); } .monitor-actions { align-items: flex-end; flex-direction: column; } }
+@media (max-width: 700px) { .detail-tabs { overflow-x: auto; } .detail-tabs button { min-width: 112px; } .device-summary { grid-template-columns: 1fr; } .gateway-card { grid-template-columns: 1fr; } .trend-stats { grid-template-columns: repeat(2, 1fr); } .monitor-actions { align-items: flex-end; flex-direction: column; } .remote-field-card, .remote-config-actions, .remote-device-heading { align-items: stretch; flex-direction: column; } .remote-point-panel { padding-left: 12px; } }
 </style>

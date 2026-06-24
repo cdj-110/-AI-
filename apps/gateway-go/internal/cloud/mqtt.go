@@ -12,33 +12,152 @@ import (
 )
 
 type Client struct {
-	gatewayKey string
-	mqtt       mqtt.Client
+	name            string
+	gatewayKey      string
+	hardwareID      string
+	topicTemplate   string
+	payloadMode     string
+	payloadTemplate string
+	mqtt            mqtt.Client
 }
 
-func NewMQTT(cfg config.Config, onConnectionChanged func(bool)) *Client {
-	options := mqtt.NewClientOptions().
-		AddBroker(cfg.MQTT.Broker).
-		SetClientID(cfg.MQTT.ClientID).
-		SetUsername(cfg.MQTT.Username).
-		SetPassword(cfg.MQTT.Password).
+type RemoteConfigCommand struct {
+	TaskID  string          `json:"taskId"`
+	Version int             `json:"version"`
+	Config  json.RawMessage `json:"config"`
+}
+
+type RemoteConfigResult struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+type MQTTOptions struct {
+	Name            string
+	Broker          string
+	ClientID        string
+	Username        string
+	Password        string
+	GatewayKey      string
+	HardwareID      string
+	TopicTemplate   string
+	PayloadMode     string
+	PayloadTemplate string
+}
+
+func NewManualMQTT(cfg config.Config, onConnectionChanged func(bool)) *Client {
+	return NewMQTT(MQTTOptions{
+		Name:            "manual",
+		Broker:          cfg.MQTT.Broker,
+		ClientID:        cfg.MQTT.ClientID,
+		Username:        cfg.MQTT.Username,
+		Password:        cfg.MQTT.Password,
+		GatewayKey:      cfg.GatewayKey,
+		TopicTemplate:   cfg.MQTT.TopicTemplate,
+		PayloadMode:     cfg.MQTT.PayloadMode,
+		PayloadTemplate: cfg.MQTT.PayloadTemplate,
+	}, onConnectionChanged)
+}
+
+func NewActivationMQTT(cfg config.Config, onConnectionChanged func(bool)) *Client {
+	return NewMQTT(MQTTOptions{
+		Name:       "activation",
+		Broker:     cfg.Activation.Broker,
+		ClientID:   "factory_" + cfg.Activation.HardwareID,
+		Username:   "factory:" + cfg.Activation.HardwareID,
+		Password:   cfg.Activation.DeviceSecret,
+		GatewayKey: cfg.Activation.SN,
+		HardwareID: cfg.Activation.HardwareID,
+	}, onConnectionChanged)
+}
+
+func NewMQTT(opts MQTTOptions, onConnectionChanged func(bool)) *Client {
+	clientOptions := mqtt.NewClientOptions().
+		AddBroker(opts.Broker).
+		SetClientID(opts.ClientID).
+		SetUsername(opts.Username).
+		SetPassword(opts.Password).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
+		SetResumeSubs(true).
 		SetConnectTimeout(5 * time.Second).
 		SetKeepAlive(30 * time.Second)
 	if onConnectionChanged != nil {
-		options.SetOnConnectHandler(func(mqtt.Client) {
+		clientOptions.SetOnConnectHandler(func(mqtt.Client) {
 			onConnectionChanged(true)
 		})
-		options.SetConnectionLostHandler(func(_ mqtt.Client, _ error) {
+		clientOptions.SetConnectionLostHandler(func(_ mqtt.Client, _ error) {
 			onConnectionChanged(false)
 		})
 	}
 
 	return &Client{
-		gatewayKey: cfg.GatewayKey,
-		mqtt:       mqtt.NewClient(options),
+		name:            opts.Name,
+		gatewayKey:      opts.GatewayKey,
+		hardwareID:      opts.HardwareID,
+		topicTemplate:   defaultString(opts.TopicTemplate, "attributes"),
+		payloadMode:     defaultString(opts.PayloadMode, "flat"),
+		payloadTemplate: opts.PayloadTemplate,
+		mqtt:            mqtt.NewClient(clientOptions),
 	}
+}
+
+func (c *Client) SubscribeRemoteConfig(handler func(RemoteConfigCommand) RemoteConfigResult, snapshot func() interface{}) error {
+	if !c.mqtt.IsConnected() {
+		return fmt.Errorf("mqtt is not connected")
+	}
+	setTopic := fmt.Sprintf("weikong/gateways/%s/config/set", c.gatewayKey)
+	getTopic := fmt.Sprintf("weikong/gateways/%s/config/get", c.gatewayKey)
+	report := func() {
+		payload := map[string]interface{}{"config": snapshot(), "reportedAt": time.Now().Format(time.RFC3339Nano)}
+		if err := c.publish(fmt.Sprintf("weikong/gateways/%s/config/reported", c.gatewayKey), payload); err != nil {
+			fmt.Printf("publish current config failed: %v\n", err)
+		}
+	}
+	token := c.mqtt.SubscribeMultiple(map[string]byte{setTopic: 1, getTopic: 1}, func(_ mqtt.Client, message mqtt.Message) {
+		if message.Topic() == getTopic {
+			report()
+			return
+		}
+		var command RemoteConfigCommand
+		result := RemoteConfigResult{Status: "FAILED"}
+		if err := json.Unmarshal(message.Payload(), &command); err != nil {
+			result.Message = "parse remote config command failed: " + err.Error()
+		} else if command.TaskID == "" || len(command.Config) == 0 {
+			result.Message = "remote config taskId/config is required"
+		} else {
+			result = handler(command)
+		}
+		reply := map[string]interface{}{
+			"taskId":      command.TaskID,
+			"version":     command.Version,
+			"status":      result.Status,
+			"message":     result.Message,
+			"completedAt": time.Now().Format(time.RFC3339Nano),
+		}
+		if err := c.publish(fmt.Sprintf("weikong/gateways/%s/config/reply", c.gatewayKey), reply); err != nil {
+			fmt.Printf("publish remote config reply failed: %v\n", err)
+		}
+		if result.Status == "APPLIED" {
+			report()
+		}
+	})
+	if !token.WaitTimeout(5 * time.Second) {
+		return fmt.Errorf("subscribe remote config timeout")
+	}
+	if err := token.Error(); err != nil {
+		return err
+	}
+	report()
+	return nil
+}
+
+func (c *Client) Name() string {
+	return c.name
+}
+
+func (c *Client) IsManual() bool {
+	return c.name == "manual"
 }
 
 func (c *Client) Connect() error {
@@ -62,6 +181,16 @@ func (c *Client) IsConnected() bool {
 
 func (c *Client) PublishGatewayHeartbeat() error {
 	payload := map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339Nano)}
+	if c.hardwareID != "" {
+		if err := c.publish(fmt.Sprintf("weikong/factory/%s/heartbeat", c.hardwareID), payload); err != nil {
+			return err
+		}
+		if err := c.publish(fmt.Sprintf("weikong/devices/%s/heartbeat", c.gatewayKey), payload); err != nil {
+			// 出厂未绑定阶段，平台只允许 factory 心跳；绑定完成后正式设备主题会恢复可用。
+			return nil
+		}
+		return nil
+	}
 	return c.publish(fmt.Sprintf("weikong/devices/%s/heartbeat", c.gatewayKey), payload)
 }
 
@@ -84,6 +213,71 @@ func (c *Client) PublishTelemetry(reading model.Reading) error {
 		},
 	}
 	return c.publish(fmt.Sprintf("weikong/gateways/%s/children/%s/telemetry", c.gatewayKey, reading.DeviceKey), payload)
+}
+
+func (c *Client) PublishAttributes(metrics map[string]interface{}) error {
+	payload, err := c.RenderManualPayload(metrics, nil)
+	if err != nil {
+		return err
+	}
+	return c.publish(c.RenderManualTopic(), payload)
+}
+
+func (c *Client) PublishManual(grouped map[string]map[string]interface{}) error {
+	flat := map[string]interface{}{}
+	for _, metrics := range grouped {
+		for key, value := range metrics {
+			flat[key] = value
+		}
+	}
+	payload, err := c.RenderManualPayload(flat, grouped)
+	if err != nil {
+		return err
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	return c.publish(c.RenderManualTopic(), payload)
+}
+
+func (c *Client) RenderManualTopic() string {
+	topic := c.topicTemplate
+	if topic == "" {
+		topic = "attributes"
+	}
+	topic = strings.ReplaceAll(topic, "{gatewayKey}", c.gatewayKey)
+	topic = strings.ReplaceAll(topic, "{ts}", time.Now().Format(time.RFC3339Nano))
+	return topic
+}
+
+func (c *Client) RenderManualPayload(metrics map[string]interface{}, grouped map[string]map[string]interface{}) (map[string]interface{}, error) {
+	attributes := sanitizeMetrics(metrics)
+	if c.payloadMode == "grouped" {
+		return map[string]interface{}{
+			"ts":         time.Now().Format(time.RFC3339Nano),
+			"gatewayKey": c.gatewayKey,
+			"devices":    grouped,
+		}, nil
+	}
+	if c.payloadMode != "custom" {
+		return attributes, nil
+	}
+	template := strings.TrimSpace(c.payloadTemplate)
+	if template == "" {
+		return attributes, nil
+	}
+	rendered := renderPayloadTemplate(template, map[string]interface{}{
+		"gatewayKey": c.gatewayKey,
+		"ts":         time.Now().Format(time.RFC3339Nano),
+		"attributes": attributes,
+		"metrics":    attributes,
+		"devices":    grouped,
+	})
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(rendered), &payload); err != nil {
+		return nil, fmt.Errorf("parse rendered payload template failed: %w", err)
+	}
+	return payload, nil
 }
 
 func sanitizeMetrics(metrics map[string]interface{}) map[string]interface{} {
@@ -113,4 +307,26 @@ func (c *Client) publish(topic string, payload interface{}) error {
 		return token.Error()
 	}
 	return nil
+}
+
+func defaultString(value string, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func renderPayloadTemplate(template string, values map[string]interface{}) string {
+	rendered := template
+	for key, value := range values {
+		token := "{" + key + "}"
+		raw, _ := json.Marshal(value)
+		rendered = strings.ReplaceAll(rendered, token, string(raw))
+		stringToken := "\"" + token + "\""
+		if text, ok := value.(string); ok {
+			quoted, _ := json.Marshal(text)
+			rendered = strings.ReplaceAll(rendered, stringToken, string(quoted))
+		}
+	}
+	return rendered
 }

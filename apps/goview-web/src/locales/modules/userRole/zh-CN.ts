@@ -1,0 +1,23 @@
+export default {
+    pageTitle: '角色权限',
+    roleName: '角色名称',
+    createTime: '创建时间',
+    operation: '操作',
+    addRole: '新增角色',
+    editRole: '编辑角色',
+    edit: '编辑',
+    delete: '删除',
+    search: '搜索',
+    confirmDelete: '确定删除角色「{name}」吗？',
+    prompt: '提示',
+    confirm: '确定',
+    cancel: '取消',
+    deleteSuccess: '删除成功',
+    roleNameLabel: '角色名称',
+    roleNamePlaceholder: '请输入角色名称',
+    permission: '权限',
+    all: '全部',
+    cancelBtn: '取消',
+    confirmBtn: '确定',
+    submitSuccess: '提交成功'
+}

@@ -258,6 +258,7 @@ export class DevicesController {
       targetId: id,
       ip: this.clientIp(request),
       userAgent: request.headers['user-agent'],
+      detail: result.factoryGateway ? { factoryGateway: result.factoryGateway, bindingReleased: true } : undefined,
     });
     return result;
   }

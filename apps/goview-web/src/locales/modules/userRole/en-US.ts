@@ -1,0 +1,23 @@
+export default {
+    pageTitle: 'Role Permissions',
+    roleName: 'Role Name',
+    createTime: 'Create Time',
+    operation: 'Operation',
+    addRole: 'Add Role',
+    editRole: 'Edit Role',
+    edit: 'Edit',
+    delete: 'Delete',
+    search: 'Search',
+    confirmDelete: 'Confirm to delete role "{name}"?',
+    prompt: 'Prompt',
+    confirm: 'Confirm',
+    cancel: 'Cancel',
+    deleteSuccess: 'Delete Success',
+    roleNameLabel: 'Role Name',
+    roleNamePlaceholder: 'Please enter role name',
+    permission: 'Permission',
+    all: 'All',
+    cancelBtn: 'Cancel',
+    confirmBtn: 'Confirm',
+    submitSuccess: 'Submit Success'
+}

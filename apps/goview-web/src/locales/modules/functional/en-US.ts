@@ -1,0 +1,22 @@
+export default {
+    bindModel: 'Bind Model',
+    selectCreatedModel: 'Select Created Model',
+    noModelAlert: 'Device is not bound to a model. Please bind a model before configuring functional properties.',
+    updateDeviceModel: 'Update Device Model',
+    propertyNamePlaceholder: 'Property Name/Identifier',
+    query: 'Query',
+    refresh: 'Refresh',
+    propertyName: 'Property Name',
+    propertyType: 'Property Type',
+    readOnly: 'Read Only',
+    writeOnly: 'Write Only',
+    readWrite: 'Read Write',
+    identifier: 'Identifier',
+    propertyValue: 'Property Value',
+    on: 'On',
+    off: 'Off',
+    updateTime: 'Update Time',
+    historicalData: 'Historical Data',
+    operation: 'Operation',
+    sendData: 'Send Data'
+}

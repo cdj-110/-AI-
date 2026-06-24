@@ -1,0 +1,263 @@
+{
+  "gatewayKey": "WK20260F829093",
+  "collectIntervalSeconds": 1,
+  "cacheFile": ".runtime/gateway-spool.jsonl",
+  "offlineCache": {
+    "enabled": false,
+    "maxSizeMB": 16
+  },
+  "activation": {
+    "enabled": true,
+    "file": "activation.local.json"
+  },
+  "mqtt": {
+    "enabled": true,
+    "broker": "mqtt://39.106.71.228:1883",
+    "clientId": "user819249oa6e3z",
+    "username": "user819249oa6e3z",
+    "password": "#44G70O9D209#92=",
+    "topicTemplate": "attributes",
+    "payloadMode": "flat"
+  },
+  "resources": [
+    {
+      "resourceKey": "Serial1",
+      "name": "Serial1",
+      "type": "serial",
+      "enabled": true,
+      "serial": {
+        "name": "Serial1",
+        "port": "COM1",
+        "baudRate": 9600,
+        "dataBits": 8,
+        "stopBits": 1,
+        "parity": "none",
+        "enabled": true
+      }
+    },
+    {
+      "resourceKey": "Serial2",
+      "name": "Serial2",
+      "type": "serial",
+      "enabled": true,
+      "serial": {
+        "name": "Serial2",
+        "port": "COM2",
+        "baudRate": 9600,
+        "dataBits": 8,
+        "stopBits": 1,
+        "parity": "none",
+        "enabled": true
+      }
+    },
+    {
+      "resourceKey": "网口1",
+      "name": "网口1",
+      "type": "network",
+      "enabled": true,
+      "network": {
+        "name": "网口1",
+        "interface": "eth0",
+        "mode": "static",
+        "prefixLength": 24,
+        "address": "192.168.1.50:502",
+        "enabled": true
+      }
+    },
+    {
+      "resourceKey": "网口2",
+      "name": "网口2",
+      "type": "network",
+      "enabled": true,
+      "network": {
+        "name": "网口2",
+        "interface": "eth1",
+        "mode": "static",
+        "prefixLength": 24,
+        "address": "192.168.1.51:502",
+        "enabled": true
+      }
+    }
+  ],
+  "channels": [
+    {
+      "channelKey": "Serial1-modbus-rtu",
+      "resourceKey": "Serial1",
+      "name": "Serial1 modbus-rtu",
+      "type": "serial",
+      "protocol": "modbus-rtu",
+      "collectIntervalSeconds": 1,
+      "interfaceName": "Serial1",
+      "enabled": true,
+      "serial": {
+        "name": "Serial1",
+        "port": "COM1",
+        "baudRate": 9600,
+        "dataBits": 8,
+        "stopBits": 1,
+        "parity": "none",
+        "enabled": true
+      }
+    },
+    {
+      "channelKey": "Serial2-modbus-rtu",
+      "resourceKey": "Serial2",
+      "name": "Serial2 modbus-rtu",
+      "type": "serial",
+      "protocol": "modbus-rtu",
+      "collectIntervalSeconds": 1,
+      "interfaceName": "Serial2",
+      "enabled": true,
+      "serial": {
+        "name": "Serial2",
+        "port": "COM2",
+        "baudRate": 9600,
+        "dataBits": 8,
+        "stopBits": 1,
+        "parity": "none",
+        "enabled": true
+      }
+    },
+    {
+      "channelKey": "网口2-modbus-tcp",
+      "resourceKey": "网口2",
+      "name": "网口2 modbus-tcp",
+      "type": "network",
+      "protocol": "modbus-tcp",
+      "collectIntervalSeconds": 1,
+      "interfaceName": "网口2",
+      "enabled": true,
+      "network": {
+        "name": "网口2",
+        "interface": "eth1",
+        "mode": "static",
+        "prefixLength": 24,
+        "address": "192.168.1.51:502",
+        "enabled": true
+      }
+    },
+    {
+      "channelKey": "网口1-channel-04",
+      "resourceKey": "网口1",
+      "name": "通道1",
+      "type": "network",
+      "protocol": "modbus-tcp",
+      "collectIntervalSeconds": 1,
+      "interfaceName": "网口1",
+      "enabled": true,
+      "network": {
+        "name": "网口1",
+        "interface": "eth0",
+        "mode": "static",
+        "prefixLength": 24,
+        "address": "192.168.1.50:502",
+        "enabled": true
+      }
+    },
+    {
+      "channelKey": "网口1-channel-05",
+      "resourceKey": "网口1",
+      "name": "通道2",
+      "type": "network",
+      "protocol": "opcua",
+      "collectIntervalSeconds": 1,
+      "interfaceName": "网口1",
+      "enabled": true,
+      "network": {
+        "name": "网口1",
+        "interface": "eth0",
+        "mode": "static",
+        "prefixLength": 24,
+        "address": "192.168.1.50:502",
+        "enabled": true
+      }
+    }
+  ],
+  "serialPorts": [
+    {
+      "name": "Serial1",
+      "port": "COM1",
+      "baudRate": 9600,
+      "dataBits": 8,
+      "stopBits": 1,
+      "parity": "none",
+      "enabled": true
+    },
+    {
+      "name": "Serial2",
+      "port": "COM2",
+      "baudRate": 9600,
+      "dataBits": 8,
+      "stopBits": 1,
+      "parity": "none",
+      "enabled": true
+    }
+  ],
+  "networkPorts": [
+    {
+      "name": "网口1",
+      "interface": "eth0",
+      "mode": "static",
+      "prefixLength": 24,
+      "address": "192.168.1.50:502",
+      "enabled": true
+    },
+    {
+      "name": "网口2",
+      "interface": "eth1",
+      "mode": "static",
+      "prefixLength": 24,
+      "address": "192.168.1.51:502",
+      "enabled": true
+    }
+  ],
+  "devices": [
+    {
+      "deviceKey": "device-001",
+      "channelKey": "网口1-channel-04",
+      "name": "测试1",
+      "interfaceType": "network",
+      "interfaceName": "网口1",
+      "protocol": "modbus-tcp",
+      "address": "192.168.1.210:502",
+      "slaveId": 1,
+      "points": []
+    },
+    {
+      "deviceKey": "device-002",
+      "name": "设备2",
+      "interfaceType": "network",
+      "interfaceName": "Serial1",
+      "protocol": "iec104",
+      "address": "192.168.1.187",
+      "slaveId": 1,
+      "points": [
+        {
+          "deviceKey": "device-002",
+          "name": "点位1",
+          "metric": "point_1",
+          "protocol": "iec104",
+          "address": "192.168.1.187",
+          "slaveId": 1,
+          "function": 3,
+          "register": 0,
+          "quantity": 1,
+          "dataType": "uint16",
+          "byteOrder": "big",
+          "wordOrder": "normal",
+          "bitIndex": null,
+          "scale": 1,
+          "offset": 0
+        }
+      ]
+    }
+  ],
+  "forwardSlave": {
+    "enabled": false,
+    "listen": "0.0.0.0:1502"
+  },
+  "web": {
+    "enabled": true,
+    "listen": "0.0.0.0:8088"
+  }
+}

@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1260" viewBox="0 0 1600 1260">
+  <defs>
+    <style>
+      .bg { fill: #f6f8fb; }
+      .title { font: 700 34px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #102033; }
+      .subtitle { font: 16px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #667085; }
+      .lane-title { font: 700 20px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #1d2939; }
+      .lane { fill: #ffffff; stroke: #d9e2ef; stroke-width: 1.2; rx: 20; }
+      .node { fill: #ffffff; stroke: #c9d6e8; stroke-width: 1.5; rx: 16; filter: url(#shadow); }
+      .node-blue { fill: #eff6ff; stroke: #1677ff; }
+      .node-green { fill: #f0fdf4; stroke: #52c41a; }
+      .node-orange { fill: #fff7ed; stroke: #fa8c16; }
+      .node-red { fill: #fff1f0; stroke: #ff4d4f; }
+      .node-gray { fill: #f8fafc; stroke: #98a2b3; }
+      .decision { fill: #ffffff; stroke: #7c8da5; stroke-width: 1.5; filter: url(#shadow); }
+      .text { font: 16px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #1d2939; }
+      .small { font: 13px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #667085; }
+      .label { font: 13px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #475467; }
+      .arrow { fill: none; stroke: #667085; stroke-width: 2; marker-end: url(#arrow); }
+      .arrow-green { fill: none; stroke: #3fb950; stroke-width: 2; marker-end: url(#arrowGreen); }
+      .arrow-red { fill: none; stroke: #e5484d; stroke-width: 2; marker-end: url(#arrowRed); }
+    </style>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#102033" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#667085"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#3fb950"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#e5484d"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1260"/>
+  <text class="title" x="70" y="70">Go 网关与云平台预注册、激活、绑定流程</text>
+  <text class="subtitle" x="70" y="105">核心原则：网关先凭预注册凭证安全上线，未绑定前不归属任何租户；客户输入 SN + BindCode 后完成数据归属。</text>
+
+  <rect class="lane" x="55" y="150" width="450" height="1000"/>
+  <rect class="lane" x="575" y="150" width="450" height="1000"/>
+  <rect class="lane" x="1095" y="150" width="450" height="1000"/>
+  <text class="lane-title" x="80" y="190">工厂 / 管理员</text>
+  <text class="lane-title" x="600" y="190">云平台后端</text>
+  <text class="lane-title" x="1120" y="190">Go 网关 / 客户</text>
+
+  <g>
+    <rect class="node node-blue" x="110" y="230" width="330" height="78"/>
+    <text class="text" x="135" y="263">1. 网关硬件出厂</text>
+    <text class="small" x="135" y="287">硬件具备唯一 HardwareId</text>
+  </g>
+  <g>
+    <rect class="node node-blue" x="110" y="355" width="330" height="88"/>
+    <text class="text" x="135" y="390">2. 工厂读取 HardwareId</text>
+    <text class="small" x="135" y="416">扫码工具 / 烧录工具 / 本地页面</text>
+  </g>
+  <g>
+    <rect class="node node-blue" x="110" y="495" width="330" height="92"/>
+    <text class="text" x="135" y="530">3. 管理员预注册网关</text>
+    <text class="small" x="135" y="556">提交 HardwareId 到云平台</text>
+  </g>
+
+  <g>
+    <rect class="node node-orange" x="635" y="245" width="330" height="110"/>
+    <text class="text" x="660" y="280">4. 生成设备身份</text>
+    <text class="small" x="660" y="307">SN：客户绑定使用</text>
+    <text class="small" x="660" y="330">DeviceSecret：MQTT 鉴权使用</text>
+  </g>
+  <g>
+    <rect class="node node-orange" x="635" y="405" width="330" height="96"/>
+    <text class="text" x="660" y="440">5. 生成 BindCode</text>
+    <text class="small" x="660" y="466">客户后续输入绑定码完成归属</text>
+  </g>
+  <g>
+    <rect class="node node-orange" x="635" y="550" width="330" height="106"/>
+    <text class="text" x="660" y="585">6. 写入预注册库</text>
+    <text class="small" x="660" y="612">FactoryGateway</text>
+    <text class="small" x="660" y="635">状态：未绑定 / 未上线</text>
+  </g>
+  <g>
+    <rect class="node node-orange" x="635" y="705" width="330" height="104"/>
+    <text class="text" x="660" y="740">7. 生成激活文件</text>
+    <text class="small" x="660" y="766">activation.local.json</text>
+    <text class="small" x="660" y="789">包含 HardwareId / SN / Secret</text>
+  </g>
+
+  <g>
+    <rect class="node node-green" x="1155" y="245" width="330" height="96"/>
+    <text class="text" x="1180" y="280">8. 网关导入激活文件</text>
+    <text class="small" x="1180" y="306">本地保存 activation.local.json</text>
+  </g>
+  <g>
+    <polygon class="decision" points="1320,390 1485,465 1320,540 1155,465"/>
+    <text class="text" x="1250" y="455">9. HardwareId</text>
+    <text class="text" x="1265" y="480">是否匹配？</text>
+  </g>
+  <g>
+    <rect class="node node-red" x="1155" y="585" width="330" height="86"/>
+    <text class="text" x="1180" y="620">激活失败</text>
+    <text class="small" x="1180" y="646">拒绝使用该激活文件连接云平台</text>
+  </g>
+  <g>
+    <rect class="node node-green" x="1155" y="725" width="330" height="96"/>
+    <text class="text" x="1180" y="760">10. MQTT 鉴权连接</text>
+    <text class="small" x="1180" y="786">使用 SN + DeviceSecret</text>
+  </g>
+
+  <g>
+    <rect class="node node-green" x="635" y="850" width="330" height="96"/>
+    <text class="text" x="660" y="885">11. 云平台收到心跳</text>
+    <text class="small" x="660" y="911">更新 lastSeenAt / 在线状态</text>
+  </g>
+  <g>
+    <polygon class="decision" points="800,985 965,1060 800,1135 635,1060"/>
+    <text class="text" x="730" y="1050">12. 是否已绑定</text>
+    <text class="text" x="755" y="1075">租户？</text>
+  </g>
+
+  <g>
+    <rect class="node node-gray" x="110" y="850" width="330" height="96"/>
+    <text class="text" x="135" y="885">13. 未绑定在线</text>
+    <text class="small" x="135" y="911">ONLINE_UNBOUND，仅管理员可见</text>
+  </g>
+  <g>
+    <rect class="node node-blue" x="110" y="1000" width="330" height="96"/>
+    <text class="text" x="135" y="1035">14. 客户输入 SN + BindCode</text>
+    <text class="small" x="135" y="1061">云平台校验后绑定当前租户</text>
+  </g>
+
+  <g>
+    <rect class="node node-green" x="1155" y="920" width="330" height="96"/>
+    <text class="text" x="1180" y="955">15. 已绑定在线</text>
+    <text class="small" x="1180" y="981">ONLINE，归属客户租户</text>
+  </g>
+  <g>
+    <rect class="node node-green" x="1155" y="1060" width="330" height="96"/>
+    <text class="text" x="1180" y="1095">16. 上报实时数据</text>
+    <text class="small" x="1180" y="1121">数据、告警、子设备进入客户账号</text>
+  </g>
+
+  <path class="arrow" d="M275 308 L275 355"/>
+  <path class="arrow" d="M275 443 L275 495"/>
+  <path class="arrow" d="M440 541 C520 541 555 300 635 300"/>
+  <path class="arrow" d="M800 355 L800 405"/>
+  <path class="arrow" d="M800 501 L800 550"/>
+  <path class="arrow" d="M800 656 L800 705"/>
+  <path class="arrow" d="M965 757 C1045 757 1075 293 1155 293"/>
+  <path class="arrow" d="M1320 341 L1320 390"/>
+  <path class="arrow-green" d="M1320 540 L1320 725"/>
+  <text class="label" x="1335" y="618">匹配</text>
+  <path class="arrow-red" d="M1155 465 C1100 465 1100 628 1155 628"/>
+  <text class="label" x="1088" y="552">不匹配</text>
+  <path class="arrow-green" d="M1155 773 C1050 773 1030 898 965 898"/>
+  <path class="arrow" d="M800 946 L800 985"/>
+  <path class="arrow" d="M635 1060 C540 1060 520 898 440 898"/>
+  <text class="label" x="535" y="990">未绑定</text>
+  <path class="arrow" d="M275 946 L275 1000"/>
+  <path class="arrow-green" d="M440 1048 C560 1048 560 1060 635 1060"/>
+  <path class="arrow-green" d="M965 1060 C1045 1060 1075 968 1155 968"/>
+  <text class="label" x="1015" y="1028">已绑定</text>
+  <path class="arrow-green" d="M1320 1016 L1320 1060"/>
+
+  <rect x="70" y="1180" width="1460" height="46" rx="12" fill="#eef4ff" stroke="#c7d7fe"/>
+  <text class="small" x="95" y="1209">后端落地重点：FactoryGateway 预注册表、管理员预注册接口、激活文件生成、MQTT 鉴权、心跳在线状态、客户绑定接口、遥测数据按租户归属。</text>
+</svg>

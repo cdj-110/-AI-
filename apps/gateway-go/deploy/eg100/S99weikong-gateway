@@ -1,0 +1,35 @@
+#!/bin/sh
+
+DAEMON=/userdata/weikong/bin/weikong-gateway
+CONFIG=/userdata/weikong/config/config.local.json
+PIDFILE=/var/run/weikong-gateway.pid
+
+case "$1" in
+  start)
+    if [ ! -x "$DAEMON" ]; then
+      echo "weikong-gateway: executable not found: $DAEMON"
+      exit 1
+    fi
+    if [ ! -f "$CONFIG" ]; then
+      echo "weikong-gateway: config not found: $CONFIG"
+      exit 1
+    fi
+    mkdir -p /userdata/weikong/data
+    echo "Starting weikong-gateway"
+    start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- -config "$CONFIG"
+    ;;
+  stop)
+    echo "Stopping weikong-gateway"
+    start-stop-daemon -K -p "$PIDFILE" -x "$DAEMON"
+    rm -f "$PIDFILE"
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac

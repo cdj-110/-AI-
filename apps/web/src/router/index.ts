@@ -6,6 +6,8 @@ import DeviceLogs from '../views/DeviceLogs.vue';
 import Devices from '../views/Devices.vue';
 import DeviceDetail from '../views/DeviceDetail.vue';
 import DeviceMap from '../views/DeviceMap.vue';
+import CloudScada from '../views/CloudScada.vue';
+import FactoryGateways from '../views/FactoryGateways.vue';
 import ForgotPassword from '../views/ForgotPassword.vue';
 import Login from '../views/Login.vue';
 import LoginLogs from '../views/LoginLogs.vue';
@@ -32,7 +34,9 @@ const router = createRouter({
         { path: 'system-status', component: SystemStatus, meta: { roles: ['SUPER_ADMIN', 'TENANT_ADMIN'] } },
         { path: 'devices', component: Devices },
         { path: 'devices/:id', component: DeviceDetail },
+        { path: 'factory-gateways', component: FactoryGateways, meta: { roles: ['SUPER_ADMIN', 'TENANT_ADMIN'] } },
         { path: 'device-map', component: DeviceMap },
+        { path: 'cloud-scada', component: CloudScada },
         { path: 'model-templates', component: ModelTemplates },
         { path: 'alarms', component: Alarms },
         { path: 'login-logs', component: LoginLogs, meta: { roles: ['SUPER_ADMIN', 'TENANT_ADMIN'] } },

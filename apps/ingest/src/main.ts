@@ -12,6 +12,7 @@ const telemetryTopic = 'weikong/devices/+/telemetry';
 // 网关代发主题：网关设备用自己的凭证替子设备发布心跳/遥测。
 const gatewayChildHeartbeatTopic = 'weikong/gateways/+/children/+/heartbeat';
 const gatewayChildTelemetryTopic = 'weikong/gateways/+/children/+/telemetry';
+const factoryGatewayHeartbeatTopic = 'weikong/factory/+/heartbeat';
 // EMQX 系统事件用于快速感知 MQTT 客户端连接/断开。
 const connectedTopic = '$SYS/brokers/+/clients/+/connected';
 const disconnectedTopic = '$SYS/brokers/+/clients/+/disconnected';
@@ -29,8 +30,10 @@ const connectedDeviceKeys = new Set<string>();
 const disconnectGraceSeconds = Number(process.env.DEVICE_DISCONNECT_GRACE_SECONDS ?? 3);
 const pendingOfflineTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const statusNotifyIntervalMs = Number(process.env.DEVICE_STATUS_NOTIFY_INTERVAL_MS ?? 5000);
+const telemetryRealtimeWindowMs = Number(process.env.TELEMETRY_REALTIME_WINDOW_SECONDS ?? 30) * 1000;
 const lastStatusNotifyMap = new Map<string, number>();
 const startedAt = Date.now();
+const resolvedAlarmSuppression = new Set<string>();
 const client = mqtt.connect(mqttUrl, {
   clientId: `weikong-ingest-${Date.now()}`,
   username: process.env.MQTT_USERNAME ?? 'platform-ingest',
@@ -95,6 +98,10 @@ client.on('connect', () => {
     if (error) console.error('[ingest] gateway child subscribe failed', error);
     else console.log('[ingest] subscribed to gateway child topics');
   });
+  client.subscribe(factoryGatewayHeartbeatTopic, (error) => {
+    if (error) console.error('[ingest] factory gateway subscribe failed', error);
+    else console.log(`[ingest] subscribed to ${factoryGatewayHeartbeatTopic}`);
+  });
   client.subscribe([connectedTopic, disconnectedTopic], (error) => {
     if (error) console.error('[ingest] broker status subscribe failed', error);
     else console.log('[ingest] subscribed to MQTT client status events');
@@ -104,6 +111,11 @@ client.on('connect', () => {
 client.on('message', async (topic, payload) => {
   if (topic.startsWith('$SYS/brokers/')) {
     await processConnectionStatus(topic);
+    return;
+  }
+  const factoryHeartbeat = topic.match(/^weikong\/factory\/([^/]+)\/heartbeat$/);
+  if (factoryHeartbeat) {
+    await processFactoryGatewayHeartbeat(factoryHeartbeat[1]);
     return;
   }
   // 同一入口同时处理直连设备和网关子设备，先把 Topic 解析成统一路由结构。
@@ -124,15 +136,26 @@ client.on('message', async (topic, payload) => {
     if (messageType === 'telemetry') {
       // 支持扁平 JSON，也支持设备原始的 d.*.Val 嵌套格式。
       const telemetry = normalizeTelemetryPayload(JSON.parse(payload.toString()));
+      const receivedAt = new Date();
+      const eventTime = telemetry.time ?? receivedAt;
       const stored = await timescale.query<{ time: Date }>(
-        'INSERT INTO telemetry_events (time, device_key, metrics) VALUES ($1, $2, $3) RETURNING time',
-        [telemetry.time ?? new Date(), device.deviceKey, telemetry.metrics],
+        `INSERT INTO telemetry_events (time, device_key, metrics)
+         SELECT $1, $2, $3
+         WHERE NOT EXISTS (
+           SELECT 1 FROM telemetry_events WHERE device_key = $2 AND time = $1
+         )
+         RETURNING time`,
+        [eventTime, device.deviceKey, telemetry.metrics],
       );
-      await timescale.query("SELECT pg_notify('telemetry_updates', $1)", [
-        JSON.stringify({ deviceKey: device.deviceKey, time: stored.rows[0].time, metrics: telemetry.metrics }),
-      ]);
+      if (!stored.rowCount) return;
+      const isRealtime = Math.abs(receivedAt.getTime() - eventTime.getTime()) <= telemetryRealtimeWindowMs;
+      if (isRealtime) {
+        await timescale.query("SELECT pg_notify('telemetry_updates', $1)", [
+          JSON.stringify({ deviceKey: device.deviceKey, time: stored.rows[0].time, metrics: telemetry.metrics }),
+        ]);
+      }
       await discoverMetrics(device.id, telemetry.metrics);
-      await processAlarms(device, telemetry.metrics);
+      if (isRealtime) await processAlarms(device, telemetry.metrics);
       console.log(gatewayKey ? `[ingest] gateway telemetry ${gatewayKey}/${device.deviceKey}` : `[ingest] telemetry ${device.deviceKey}`);
     } else {
       console.log(gatewayKey ? `[ingest] gateway heartbeat ${gatewayKey}/${device.deviceKey}` : `[ingest] heartbeat ${device.deviceKey}`);
@@ -220,6 +243,30 @@ async function findGatewayChild(gatewayKey: string, childKey: string) {
       },
     },
   });
+}
+
+async function processFactoryGatewayHeartbeat(hardwareId: string) {
+  const normalizedHardwareId = hardwareId.trim().toUpperCase();
+  const now = new Date();
+  const factoryGateway = await prisma.factoryGateway.findUnique({
+    where: { hardwareId: normalizedHardwareId },
+    include: { device: { select: { id: true, tenantId: true, deviceKey: true, name: true, status: true } } },
+  });
+  if (!factoryGateway) {
+    console.warn(`[ingest] ignored unknown factory gateway ${normalizedHardwareId}`);
+    return;
+  }
+  await prisma.factoryGateway.update({
+    where: { id: factoryGateway.id },
+    data: {
+      firstSeenAt: factoryGateway.firstSeenAt ?? now,
+      lastSeenAt: now,
+    },
+  });
+  if (factoryGateway.device) {
+    await updateDeviceStatus(factoryGateway.device, 'ONLINE', 'FACTORY_HEARTBEAT');
+  }
+  console.log(`[ingest] factory heartbeat ${normalizedHardwareId}${factoryGateway.device ? ` -> ${factoryGateway.device.deviceKey}` : ' (unbound)'}`);
 }
 
 async function processConnectionStatus(topic: string) {
@@ -420,8 +467,18 @@ async function syncAlarm(
   abnormal: boolean,
   recovered: boolean,
 ) {
+  const alarmKey = `${device.id}:${type}`;
   const openAlarm = await prisma.alarm.findFirst({ where: { deviceId: device.id, type, status: 'OPEN' } });
+  if (recovered) {
+    resolvedAlarmSuppression.delete(alarmKey);
+  }
   if (abnormal && !openAlarm) {
+    if (resolvedAlarmSuppression.has(alarmKey)) return;
+    const latestAlarm = await prisma.alarm.findFirst({ where: { deviceId: device.id, type }, orderBy: { createdAt: 'desc' } });
+    if (latestAlarm?.status === 'RESOLVED') {
+      resolvedAlarmSuppression.add(alarmKey);
+      return;
+    }
     const alarm = await prisma.alarm.create({
       data: { tenantId: device.tenantId, deviceId: device.id, type, level, message, value, threshold },
     });
@@ -439,6 +496,7 @@ async function syncAlarm(
     console.log(`[ingest] alarm opened ${type} for ${device.name}`);
   } else if (recovered && openAlarm) {
     const alarm = await prisma.alarm.update({ where: { id: openAlarm.id }, data: { status: 'RESOLVED', resolvedAt: new Date() } });
+    resolvedAlarmSuppression.delete(alarmKey);
     await notifyAlarmEvent({
       id: alarm.id,
       tenantId: alarm.tenantId,
@@ -510,6 +568,20 @@ async function initTimescale() {
     )
   `);
   await timescale.query("SELECT create_hypertable('telemetry_events', 'time', if_not_exists => TRUE)");
+  const deduplicated = await timescale.query(`
+    DELETE FROM telemetry_events target
+    USING (
+      SELECT device_key, time, min(ctid) AS keep_ctid
+      FROM telemetry_events
+      GROUP BY device_key, time
+      HAVING count(*) > 1
+    ) duplicates
+    WHERE target.device_key = duplicates.device_key
+      AND target.time = duplicates.time
+      AND target.ctid <> duplicates.keep_ctid
+  `);
+  if (deduplicated.rowCount) console.log(`[ingest] removed ${deduplicated.rowCount} duplicate telemetry row(s)`);
+  await timescale.query('CREATE UNIQUE INDEX IF NOT EXISTS telemetry_events_device_time_uidx ON telemetry_events (device_key, time)');
 }
 
 initTimescale().catch((error) => {

@@ -5,6 +5,8 @@ go 1.23
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.0
 	github.com/goburrow/modbus v0.1.0
+	github.com/gopcua/opcua v0.8.0
+	github.com/robinson/gos7 v0.0.0-20241205073040-7ea1d6fb9d20
 )
 
 require (

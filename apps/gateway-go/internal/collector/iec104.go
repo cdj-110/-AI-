@@ -23,13 +23,14 @@ type IEC104ConnectionResult struct {
 }
 
 type iec104Client struct {
-	conn     net.Conn
-	mu       sync.Mutex
-	values   map[uint32]interface{}
-	sendSeq  uint16
-	recvSeq  uint16
-	commonAS uint16
-	updated  time.Time
+	conn         net.Conn
+	mu           sync.Mutex
+	values       map[uint32]interface{}
+	valueUpdated map[uint32]time.Time
+	sendSeq      uint16
+	recvSeq      uint16
+	commonAS     uint16
+	updated      time.Time
 }
 
 var iec104Pool = struct {
@@ -46,13 +47,16 @@ func (IEC104) ReadPoint(ctx context.Context, point config.PointConfig) (model.Po
 	if ioa == 0 {
 		return model.PointValue{}, fmt.Errorf("IEC104 IOA 信息对象地址不能为空")
 	}
-	_ = client.interrogate()
+	client.mu.Lock()
+	previousUpdate := client.valueUpdated[ioa]
+	client.mu.Unlock()
+	if err := client.interrogate(); err != nil {
+		return model.PointValue{}, fmt.Errorf("IEC104 总召唤发送失败：%w", err)
+	}
 
 	deadline := time.Now().Add(4500 * time.Millisecond)
 	for {
-		client.mu.Lock()
-		value, ok := client.values[ioa]
-		client.mu.Unlock()
+		value, ok := client.valueAfter(ioa, previousUpdate)
 		if ok {
 			value = applyIEC104Scale(point, value)
 			return model.PointValue{DeviceKey: point.DeviceKey, Metric: point.Metric, Value: value}, nil
@@ -81,9 +85,10 @@ func TestIEC104Connection(ctx context.Context, address string, commonAS uint16) 
 	}
 	defer conn.Close()
 	client := &iec104Client{
-		conn:     conn,
-		values:   map[uint32]interface{}{},
-		commonAS: commonAS,
+		conn:         conn,
+		values:       map[uint32]interface{}{},
+		valueUpdated: map[uint32]time.Time{},
+		commonAS:     commonAS,
 	}
 	if err := client.start(); err != nil {
 		return result, err
@@ -130,9 +135,10 @@ func getIEC104Client(point config.PointConfig) (*iec104Client, error) {
 		return nil, fmt.Errorf("IEC104 连接失败 %s：%w", address, err)
 	}
 	client := &iec104Client{
-		conn:     conn,
-		values:   map[uint32]interface{}{},
-		commonAS: commonAS,
+		conn:         conn,
+		values:       map[uint32]interface{}{},
+		valueUpdated: map[uint32]time.Time{},
+		commonAS:     commonAS,
 	}
 	if err := client.start(); err != nil {
 		_ = conn.Close()
@@ -301,9 +307,18 @@ func (c *iec104Client) handleASDU(asdu []byte) {
 		offset += size
 		c.mu.Lock()
 		c.values[ioa] = value
-		c.updated = time.Now()
+		now := time.Now()
+		c.valueUpdated[ioa] = now
+		c.updated = now
 		c.mu.Unlock()
 	}
+}
+
+func (c *iec104Client) valueAfter(ioa uint32, after time.Time) (interface{}, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	value, ok := c.values[ioa]
+	return value, ok && c.valueUpdated[ioa].After(after)
 }
 
 func decodeIEC104Value(typeID byte, raw []byte) (interface{}, int, bool) {

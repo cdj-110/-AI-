@@ -11,12 +11,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/robinson/gos7"
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 	"weikong-iot-platform/apps/gateway-go/internal/mapper"
 	"weikong-iot-platform/apps/gateway-go/internal/model"
 )
 
 type SiemensS7 struct{}
+
+type goS7Connection struct {
+	handler *gos7.TCPClientHandler
+	client  gos7.Client
+	mu      sync.Mutex
+}
 
 type s7Connection struct {
 	conn net.Conn
@@ -42,22 +49,46 @@ type S7ConnectionResult struct {
 var s7Pool = struct {
 	sync.Mutex
 	items map[string]*s7Connection
-}{items: map[string]*s7Connection{}}
+	locks map[string]*sync.Mutex
+}{items: map[string]*s7Connection{}, locks: map[string]*sync.Mutex{}}
+
+var goS7Pool = struct {
+	sync.Mutex
+	items map[string]*goS7Connection
+}{items: map[string]*goS7Connection{}}
 
 func (SiemensS7) ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
-	conn, err := getS7Connection(point)
+	if !hasCustomTSAP(point) {
+		return readPointWithGoS7(ctx, point)
+	}
+	return readS7PointWithEndpointFallback(ctx, point)
+}
+
+func readPointWithGoS7(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
+	conn, err := getGoS7Connection(point)
 	if err != nil {
 		return model.PointValue{}, err
 	}
 
-	conn.mu.Lock()
-	raw, err := conn.readBytes(ctx, point)
-	conn.mu.Unlock()
+	size := int(s7ByteLength(point))
+	raw := make([]byte, size)
+	err = readGoS7Point(conn, point, raw)
 	if err != nil {
-		closeS7Connection(point)
-		return model.PointValue{}, err
+		closeGoS7Connection(point, conn)
+		conn, reconnectErr := getGoS7Connection(point)
+		if reconnectErr != nil {
+			return model.PointValue{}, fmt.Errorf("Siemens S7 reconnect failed after read error %v: %w", err, reconnectErr)
+		}
+		if retryErr := readGoS7Point(conn, point, raw); retryErr != nil {
+			closeGoS7Connection(point, conn)
+			return model.PointValue{}, fmt.Errorf("Siemens S7 read failed after reconnect: %w", retryErr)
+		}
 	}
-
+	select {
+	case <-ctx.Done():
+		return model.PointValue{}, ctx.Err()
+	default:
+	}
 	value, err := decodeS7Value(point, raw)
 	if err != nil {
 		return model.PointValue{}, err
@@ -65,8 +96,139 @@ func (SiemensS7) ReadPoint(ctx context.Context, point config.PointConfig) (model
 	return model.PointValue{DeviceKey: point.DeviceKey, Metric: point.Metric, Value: value}, nil
 }
 
+func readGoS7Point(conn *goS7Connection, point config.PointConfig, raw []byte) error {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	return readGoS7Area(conn.client, point, raw)
+}
+
+func getGoS7Connection(point config.PointConfig) (*goS7Connection, error) {
+	key := goS7ConnectionKey(point)
+	lock := s7ConnectionLock("gos7::" + key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	goS7Pool.Lock()
+	if conn := goS7Pool.items[key]; conn != nil {
+		goS7Pool.Unlock()
+		return conn, nil
+	}
+	goS7Pool.Unlock()
+
+	var handler *gos7.TCPClientHandler
+	var connectErrors []string
+	for _, connectionType := range []int{1, 2, 3} {
+		candidate := gos7.NewTCPClientHandlerWithConnectType(point.Address, int(point.Rack), int(point.Slot), connectionType)
+		candidate.Timeout = 1500 * time.Millisecond
+		candidate.IdleTimeout = 30 * time.Second
+		if err := candidate.Connect(); err != nil {
+			connectErrors = append(connectErrors, fmt.Sprintf("type=%d: %v", connectionType, err))
+			_ = candidate.Close()
+			continue
+		}
+		handler = candidate
+		break
+	}
+	if handler == nil {
+		return nil, fmt.Errorf("connect Siemens S7 %s rack=%d slot=%d failed (%s)", point.Address, point.Rack, point.Slot, strings.Join(connectErrors, "; "))
+	}
+	conn := &goS7Connection{handler: handler, client: gos7.NewClient(handler)}
+
+	goS7Pool.Lock()
+	if existing := goS7Pool.items[key]; existing != nil {
+		goS7Pool.Unlock()
+		_ = handler.Close()
+		return existing, nil
+	}
+	goS7Pool.items[key] = conn
+	goS7Pool.Unlock()
+	return conn, nil
+}
+
+func closeGoS7Connection(point config.PointConfig, target *goS7Connection) {
+	key := goS7ConnectionKey(point)
+	goS7Pool.Lock()
+	conn := goS7Pool.items[key]
+	if conn == target {
+		delete(goS7Pool.items, key)
+	}
+	goS7Pool.Unlock()
+	if conn == target {
+		conn.mu.Lock()
+		_ = conn.handler.Close()
+		conn.mu.Unlock()
+	}
+}
+
+func goS7ConnectionKey(point config.PointConfig) string {
+	return fmt.Sprintf("%s#%d#%d", point.Address, point.Rack, point.Slot)
+}
+
+func readGoS7Area(client gos7.Client, point config.PointConfig, buffer []byte) error {
+	start := int(point.Register)
+	size := len(buffer)
+	switch strings.ToUpper(strings.TrimSpace(point.Area)) {
+	case "", "DB", "V":
+		return client.AGReadDB(int(point.DBNumber), start, size, buffer)
+	case "M", "MK", "MERKER":
+		return client.AGReadMB(start, size, buffer)
+	case "I", "E", "INPUT":
+		return client.AGReadEB(start, size, buffer)
+	case "Q", "A", "OUTPUT":
+		return client.AGReadAB(start, size, buffer)
+	default:
+		return fmt.Errorf("unsupported Siemens S7 area %s", point.Area)
+	}
+}
+
+func readS7PointWithEndpointFallback(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
+	var lastErr error
+	var attempts []string
+	for _, endpoint := range s7ReadEndpointCandidates(point) {
+		candidate := point
+		candidate.Rack = endpoint.rack
+		candidate.Slot = endpoint.slot
+		candidate.LocalTSAP = formatTSAP(endpoint.localTSAP)
+		candidate.RemoteTSAP = formatTSAP(endpoint.remoteTSAP)
+
+		conn, err := getS7Connection(candidate)
+		if err != nil {
+			lastErr = err
+			attempts = append(attempts, fmt.Sprintf("%s 连接失败：%v", endpoint.label, err))
+			continue
+		}
+		conn.mu.Lock()
+		raw, err := conn.readBytes(ctx, candidate)
+		conn.mu.Unlock()
+		if err != nil {
+			closeS7Connection(candidate)
+			lastErr = fmt.Errorf("%s localTSAP=0x%04x remoteTSAP=0x%04x：%w", endpoint.label, endpoint.localTSAP, endpoint.remoteTSAP, err)
+			attempts = append(attempts, lastErr.Error())
+			continue
+		}
+		value, err := decodeS7Value(candidate, raw)
+		if err != nil {
+			lastErr = err
+			attempts = append(attempts, fmt.Sprintf("%s 解码失败：%v", endpoint.label, err))
+			continue
+		}
+		return model.PointValue{DeviceKey: point.DeviceKey, Metric: point.Metric, Value: value}, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("没有可用的 Siemens S7 通信参数")
+	}
+	if len(attempts) > 0 {
+		return model.PointValue{}, fmt.Errorf("所有 Siemens S7 通信参数均未读到数据：%s", strings.Join(attempts, "；"))
+	}
+	return model.PointValue{}, lastErr
+}
+
 func getS7Connection(point config.PointConfig) (*s7Connection, error) {
 	key := s7ConnectionKey(point)
+	lock := s7ConnectionLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+
 	s7Pool.Lock()
 	if conn := s7Pool.items[key]; conn != nil {
 		s7Pool.Unlock()
@@ -109,6 +271,17 @@ func getS7Connection(point config.PointConfig) (*s7Connection, error) {
 	return s7, nil
 }
 
+func s7ConnectionLock(key string) *sync.Mutex {
+	s7Pool.Lock()
+	defer s7Pool.Unlock()
+	lock := s7Pool.locks[key]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		s7Pool.locks[key] = lock
+	}
+	return lock
+}
+
 func closeS7Connection(point config.PointConfig) {
 	key := s7ConnectionKey(point)
 	s7Pool.Lock()
@@ -121,6 +294,18 @@ func closeS7Connection(point config.PointConfig) {
 }
 
 func TestS7Connection(ctx context.Context, point config.PointConfig) (S7ConnectionResult, error) {
+	if !hasCustomTSAP(point) {
+		_, err := getGoS7Connection(point)
+		if err != nil {
+			return S7ConnectionResult{Address: s7Address(point.Address)}, err
+		}
+		return S7ConnectionResult{
+			Address:    s7Address(point.Address),
+			Endpoint:   fmt.Sprintf("rack-slot-%d-%d", point.Rack, point.Slot),
+			LocalTSAP:  "0x0100",
+			RemoteTSAP: fmt.Sprintf("0x%04x", 0x0100+uint16(point.Rack)*0x20+uint16(point.Slot)),
+		}, nil
+	}
 	address := s7Address(point.Address)
 	var lastErr error
 	for _, endpoint := range s7EndpointCandidates(point) {
@@ -164,10 +349,23 @@ func s7Address(address string) string {
 }
 
 func s7EndpointCandidates(point config.PointConfig) []s7Endpoint {
+	if local, remote, ok := customTSAP(point); ok {
+		return []s7Endpoint{{rack: point.Rack, slot: point.Slot, localTSAP: local, remoteTSAP: remote, label: "custom-tsap"}}
+	}
+	return s7DefaultEndpointCandidates(point)
+}
+
+func s7ReadEndpointCandidates(point config.PointConfig) []s7Endpoint {
 	var candidates []s7Endpoint
 	if local, remote, ok := customTSAP(point); ok {
 		candidates = append(candidates, s7Endpoint{rack: point.Rack, slot: point.Slot, localTSAP: local, remoteTSAP: remote, label: "custom-tsap"})
 	}
+	candidates = append(candidates, s7DefaultEndpointCandidates(point)...)
+	return dedupeS7Endpoints(candidates)
+}
+
+func s7DefaultEndpointCandidates(point config.PointConfig) []s7Endpoint {
+	var candidates []s7Endpoint
 	rack := point.Rack
 	candidates = append(candidates, []s7Endpoint{
 		{rack: rack, slot: 0, localTSAP: 0x0200, remoteTSAP: 0x0200, label: "smart200-tsap"},
@@ -185,6 +383,15 @@ func s7EndpointCandidates(point config.PointConfig) []s7Endpoint {
 		s7RackSlotEndpoint(rack, 3),
 	)
 	return dedupeS7Endpoints(candidates)
+}
+
+func hasCustomTSAP(point config.PointConfig) bool {
+	_, _, ok := customTSAP(point)
+	return ok
+}
+
+func formatTSAP(value uint16) string {
+	return fmt.Sprintf("%04x", value)
 }
 
 func dedupeS7Endpoints(candidates []s7Endpoint) []s7Endpoint {
@@ -337,10 +544,19 @@ func buildS7ReadRequest(seq uint16, point config.PointConfig) ([]byte, error) {
 		0x04, 0x01,
 		0x12, 0x0a, 0x10, transportSize,
 		byte(size >> 8), byte(size),
-		byte(point.DBNumber >> 8), byte(point.DBNumber),
+		byte(s7DBNumber(point) >> 8), byte(s7DBNumber(point)),
 		area,
 		byte(bitAddress >> 16), byte(bitAddress >> 8), byte(bitAddress),
 	}, nil
+}
+
+func s7DBNumber(point config.PointConfig) uint16 {
+	switch strings.ToUpper(strings.TrimSpace(point.Area)) {
+	case "", "DB", "V":
+		return point.DBNumber
+	default:
+		return 0
+	}
 }
 
 func parseS7ReadResponse(packet []byte) ([]byte, error) {

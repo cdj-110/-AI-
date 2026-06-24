@@ -16,6 +16,7 @@ type Store struct {
 	collectSeconds int
 	mqttEnabled    bool
 	mqttConnected  bool
+	mqttChannels   map[string]MQTTChannelStatus
 	lastCollectAt  time.Time
 	lastPublishAt  time.Time
 	points         map[string]PointStatus
@@ -29,6 +30,8 @@ type PointStatus struct {
 	Metric    string      `json:"metric"`
 	Protocol  string      `json:"protocol"`
 	Address   string      `json:"address"`
+	Unit      string      `json:"unit,omitempty"`
+	Decimals  int         `json:"decimals,omitempty"`
 	Value     interface{} `json:"value"`
 	UpdatedAt *time.Time  `json:"updatedAt,omitempty"`
 	Error     string      `json:"error,omitempty"`
@@ -41,21 +44,27 @@ type Event struct {
 	Message string    `json:"message"`
 }
 
+type MQTTChannelStatus struct {
+	Enabled   bool `json:"enabled"`
+	Connected bool `json:"connected"`
+}
+
 type Snapshot struct {
-	GatewayKey     string            `json:"gatewayKey"`
-	HardwareID     hardware.Identity `json:"hardwareIdentity"`
-	StartedAt      time.Time         `json:"startedAt"`
-	UptimeSeconds  int64             `json:"uptimeSeconds"`
-	CollectSeconds int               `json:"collectSeconds"`
-	MQTTEnabled    bool              `json:"mqttEnabled"`
-	MQTTConnected  bool              `json:"mqttConnected"`
-	LastCollectAt  *time.Time        `json:"lastCollectAt,omitempty"`
-	LastPublishAt  *time.Time        `json:"lastPublishAt,omitempty"`
-	PointCount     int               `json:"pointCount"`
-	HealthyCount   int               `json:"healthyCount"`
-	ErrorCount     int               `json:"errorCount"`
-	Points         []PointStatus     `json:"points"`
-	Errors         []Event           `json:"errors"`
+	GatewayKey     string                       `json:"gatewayKey"`
+	HardwareID     hardware.Identity            `json:"hardwareIdentity"`
+	StartedAt      time.Time                    `json:"startedAt"`
+	UptimeSeconds  int64                        `json:"uptimeSeconds"`
+	CollectSeconds int                          `json:"collectSeconds"`
+	MQTTEnabled    bool                         `json:"mqttEnabled"`
+	MQTTConnected  bool                         `json:"mqttConnected"`
+	MQTTChannels   map[string]MQTTChannelStatus `json:"mqttChannels"`
+	LastCollectAt  *time.Time                   `json:"lastCollectAt,omitempty"`
+	LastPublishAt  *time.Time                   `json:"lastPublishAt,omitempty"`
+	PointCount     int                          `json:"pointCount"`
+	HealthyCount   int                          `json:"healthyCount"`
+	ErrorCount     int                          `json:"errorCount"`
+	Points         []PointStatus                `json:"points"`
+	Errors         []Event                      `json:"errors"`
 }
 
 func New(cfg config.Config) *Store {
@@ -69,6 +78,8 @@ func New(cfg config.Config) *Store {
 			Metric:    point.Metric,
 			Protocol:  point.Protocol,
 			Address:   point.Address,
+			Unit:      point.Unit,
+			Decimals:  point.Decimals,
 		}
 		pointOrder = append(pointOrder, key)
 	}
@@ -77,7 +88,8 @@ func New(cfg config.Config) *Store {
 		gatewayKey:     cfg.GatewayKey,
 		hardwareID:     hardware.ReadIdentity(),
 		collectSeconds: cfg.CollectIntervalSeconds,
-		mqttEnabled:    cfg.MQTT.IsEnabled(),
+		mqttEnabled:    cfg.MQTT.IsEnabled() || cfg.Activation.IsEnabled(),
+		mqttChannels:   mqttChannelsForConfig(cfg),
 		points:         points,
 		pointOrder:     pointOrder,
 	}
@@ -89,12 +101,35 @@ func (s *Store) SetMQTTConnected(connected bool) {
 	s.mqttConnected = connected
 }
 
+func (s *Store) ResetMQTTChannels(cfg config.Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mqttChannels = mqttChannelsForConfig(cfg)
+	s.mqttEnabled = cfg.MQTT.IsEnabled() || cfg.Activation.IsEnabled()
+	s.mqttConnected = false
+}
+
+func (s *Store) SetMQTTChannelConnected(name string, connected bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel := s.mqttChannels[name]
+	channel.Connected = connected
+	s.mqttChannels[name] = channel
+	s.mqttConnected = false
+	for _, current := range s.mqttChannels {
+		if current.Enabled && current.Connected {
+			s.mqttConnected = true
+			break
+		}
+	}
+}
+
 func (s *Store) ReplaceConfig(cfg config.Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gatewayKey = cfg.GatewayKey
 	s.collectSeconds = cfg.CollectIntervalSeconds
-	s.mqttEnabled = cfg.MQTT.IsEnabled()
+	s.mqttEnabled = cfg.MQTT.IsEnabled() || cfg.Activation.IsEnabled()
 	next := make(map[string]PointStatus, len(cfg.Points))
 	pointOrder := make([]string, 0, len(cfg.Points))
 	for _, point := range cfg.Points {
@@ -105,6 +140,8 @@ func (s *Store) ReplaceConfig(cfg config.Config) {
 		status.Metric = point.Metric
 		status.Protocol = point.Protocol
 		status.Address = point.Address
+		status.Unit = point.Unit
+		status.Decimals = point.Decimals
 		next[key] = status
 		pointOrder = append(pointOrder, key)
 	}
@@ -151,6 +188,8 @@ func (s *Store) SetPointError(point config.PointConfig, err error) {
 	status.Metric = point.Metric
 	status.Protocol = point.Protocol
 	status.Address = point.Address
+	status.Unit = point.Unit
+	status.Decimals = point.Decimals
 	status.Error = err.Error()
 	status.ErrorAt = &now
 	s.points[key] = status
@@ -190,6 +229,7 @@ func (s *Store) Snapshot() Snapshot {
 		CollectSeconds: s.collectSeconds,
 		MQTTEnabled:    s.mqttEnabled,
 		MQTTConnected:  s.mqttConnected,
+		MQTTChannels:   copyMQTTChannels(s.mqttChannels),
 		PointCount:     len(points),
 		HealthyCount:   healthy,
 		ErrorCount:     errorCount,
@@ -205,6 +245,21 @@ func (s *Store) Snapshot() Snapshot {
 		snapshot.LastPublishAt = &lastPublishAt
 	}
 	return snapshot
+}
+
+func mqttChannelsForConfig(cfg config.Config) map[string]MQTTChannelStatus {
+	return map[string]MQTTChannelStatus{
+		"activation": {Enabled: cfg.Activation.IsEnabled()},
+		"manual":     {Enabled: cfg.MQTT.IsEnabled()},
+	}
+}
+
+func copyMQTTChannels(source map[string]MQTTChannelStatus) map[string]MQTTChannelStatus {
+	result := make(map[string]MQTTChannelStatus, len(source))
+	for name, channel := range source {
+		result[name] = channel
+	}
+	return result
 }
 
 func (s *Store) appendErrorLocked(event Event) {

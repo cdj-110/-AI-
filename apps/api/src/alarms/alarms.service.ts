@@ -42,14 +42,31 @@ export class AlarmsService implements OnModuleDestroy {
   }
 
   async resolve(actor: AuthUser, id: string) {
-    const alarm = await this.prisma.alarm.findUnique({ where: { id } });
+    const alarm = await this.prisma.alarm.findUnique({
+      where: { id },
+      include: { device: { select: { name: true } } },
+    });
     if (!alarm) throw new NotFoundException('告警不存在');
     if (actor.role !== 'SUPER_ADMIN' && alarm.tenantId !== actor.tenantId) throw new ForbiddenException('无权处理该告警');
     if (alarm.status === 'RESOLVED') return alarm;
-    return this.prisma.alarm.update({
+    const resolved = await this.prisma.alarm.update({
       where: { id },
       data: { status: 'RESOLVED', resolvedAt: new Date() },
+      include: { device: { select: { name: true } } },
     });
+    await this.notifyAlarmEvent({
+      id: resolved.id,
+      tenantId: resolved.tenantId,
+      deviceId: resolved.deviceId,
+      deviceName: resolved.device.name,
+      type: resolved.type,
+      level: resolved.level,
+      message: resolved.message,
+      status: resolved.status,
+      createdAt: resolved.createdAt,
+      resolvedAt: resolved.resolvedAt,
+    });
+    return resolved;
   }
 
   stream(actor: AuthUser): Observable<MessageEvent> {
@@ -87,5 +104,13 @@ export class AlarmsService implements OnModuleDestroy {
       console.error('[api] failed to listen for alarm events', error);
       if (!this.destroying) setTimeout(() => void this.listenForAlarmEvents(), 3000);
     }
+  }
+
+  private async notifyAlarmEvent(alarm: Record<string, unknown>) {
+    await this.prisma.$executeRawUnsafe(
+      'SELECT pg_notify($1, $2)',
+      'alarm_events',
+      JSON.stringify(alarm),
+    );
   }
 }

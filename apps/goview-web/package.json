@@ -1,0 +1,62 @@
+{
+  "name": "@weikong/goview-web",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build-check": "run-p type-check \"build-only {@}\" --",
+    "preview": "vite preview",
+    "type-check": "vue-tsc --build --force"
+  },
+  "dependencies": {
+    "@amap/amap-jsapi-loader": "^1.0.1",
+    "@element-plus/icons-vue": "^2.3.2",
+    "@kjgl77/datav-vue3": "^1.7.4",
+    "@types/socket.io-client": "^1.4.36",
+    "@vueuse/core": "^11.2.0",
+    "axios": "^1.11.0",
+    "cropperjs": "^2.0.1",
+    "crypto-js": "^4.2.0",
+    "echarts": "^5.6.0",
+    "element-plus": "^2.11.7",
+    "lunar-typescript": "^1.8.0",
+    "maotu": "^0.6.2-beta3",
+    "monaco-editor": "^0.52.2",
+    "pinia": "^3.0.0",
+    "pinia-plugin-persistedstate": "^4.7.1",
+    "reconnecting-websocket": "^4.4.0",
+    "relation-graph-vue3": "^2.2.10",
+    "sass": "^1.80.7",
+    "socket.io-client": "^4.8.1",
+    "three": "^0.179.1",
+    "vue": "^3.5.12",
+    "vue-echarts": "^7.0.3",
+    "vue-i18n": "^9.14.5",
+    "vue-router": "^4.5.0",
+    "vue3-slide-verify": "^1.1.8",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tsconfig/node22": "^22.0.0",
+    "@types/cropperjs": "^1.3.3",
+    "@types/crypto-js": "^4.2.2",
+    "@types/ezuikit-js": "^8.0.0",
+    "@types/node": "^22.9.0",
+    "@types/three": "^0.178.1",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "@vue/tsconfig": "^0.5.1",
+    "npm-run-all2": "^7.0.1",
+    "typescript": "~5.6.3",
+    "unplugin-auto-import": "^0.18.3",
+    "unplugin-vue-components": "^0.27.4",
+    "vite": "^5.4.10",
+    "vite-plugin-monaco-editor": "^1.1.0",
+    "vite-plugin-vue-devtools": "^7.5.4",
+    "vue-tsc": "^2.1.10"
+  },
+  "engines": {
+    "node": "v22.11.0",
+    "npm": "10.9.0"
+  }
+}

@@ -17,6 +17,7 @@ import (
 type s7ScanRequest struct {
 	DeviceKey  string `json:"deviceKey"`
 	DeviceName string `json:"deviceName"`
+	PLCModel   string `json:"plcModel"`
 	Address    string `json:"address"`
 	Area       string `json:"area"`
 	DBNumber   uint16 `json:"dbNumber"`
@@ -108,7 +109,13 @@ func (s *Server) testS7Connection(writer http.ResponseWriter, request *http.Requ
 func scanS7PointRange(ctx context.Context, body s7ScanRequest) ([]s7PointPreviewItem, []string) {
 	body.Area = strings.ToUpper(strings.TrimSpace(body.Area))
 	if body.Area == "" || body.Area == "AUTO" {
-		return scanS7SmartAutoPoints(ctx, body)
+		if body.PLCModel == "" || body.PLCModel == "s7-200-smart" {
+			return scanS7SmartAutoPoints(ctx, body)
+		}
+		body.Area = "DB"
+		if body.DataType == "" || body.DataType == "auto" {
+			body.DataType = "uint16"
+		}
 	}
 	if body.Area == "" {
 		body.Area = "DB"
@@ -116,7 +123,7 @@ func scanS7PointRange(ctx context.Context, body s7ScanRequest) ([]s7PointPreview
 	if body.DBNumber == 0 && body.Area == "DB" {
 		body.DBNumber = 1
 	}
-	if body.DataType == "" {
+	if body.DataType == "" || body.DataType == "auto" {
 		body.DataType = "uint16"
 	}
 	if body.End < body.Start {
@@ -140,6 +147,7 @@ func scanS7PointRange(ctx context.Context, body s7ScanRequest) ([]s7PointPreview
 
 	var points []s7PointPreviewItem
 	var warnings []string
+	filteredZeroCount := 0
 	for register := body.Start; register <= body.End; {
 		point := config.PointConfig{
 			DeviceKey:  body.DeviceKey,
@@ -162,7 +170,9 @@ func scanS7PointRange(ctx context.Context, body s7ScanRequest) ([]s7PointPreview
 		}
 		point.ApplyDefaults()
 		value, err := gatewayruntime.ReadPoint(scanCtx, point)
-		if err == nil {
+		if err == nil && isZeroNumericS7ScanValue(point, value.Value) {
+			filteredZeroCount++
+		} else if err == nil {
 			points = append(points, s7PointPreviewItem{PointConfig: point, Selected: true, Value: value.Value})
 		} else if len(warnings) < 3 {
 			warnings = append(warnings, fmt.Sprintf("%s 读取失败：%v", point.Name, err))
@@ -178,6 +188,9 @@ func scanS7PointRange(ctx context.Context, body s7ScanRequest) ([]s7PointPreview
 	}
 	if len(points) == 0 && len(warnings) == 0 {
 		warnings = append(warnings, "未扫描到可读取点位，请确认 PLC IP、102 端口、PUT/GET 访问和 DB 地址范围。")
+	}
+	if filteredZeroCount > 0 {
+		warnings = append(warnings, fmt.Sprintf("已隐藏 %d 个当前值为 0 的数值型点位。", filteredZeroCount))
 	}
 	return points, warnings
 }
@@ -210,6 +223,7 @@ func scanS7SmartAutoPoints(ctx context.Context, body s7ScanRequest) ([]s7PointPr
 
 	var points []s7PointPreviewItem
 	var warnings []string
+	filteredZeroCount := 0
 	for _, item := range targets {
 		for register := item.start; register <= item.end; register += item.step {
 			point := config.PointConfig{
@@ -241,6 +255,10 @@ func scanS7SmartAutoPoints(ctx context.Context, body s7ScanRequest) ([]s7PointPr
 				}
 				continue
 			}
+			if isZeroNumericS7ScanValue(point, value.Value) {
+				filteredZeroCount++
+				continue
+			}
 			points = append(points, s7PointPreviewItem{PointConfig: point, Selected: true, Value: value.Value})
 			if len(points) >= 120 {
 				warnings = append(warnings, "本次最多返回 120 个候选点位，更多地址可后续按范围扫描。")
@@ -251,8 +269,45 @@ func scanS7SmartAutoPoints(ctx context.Context, body s7ScanRequest) ([]s7PointPr
 	if len(points) == 0 {
 		warnings = append(warnings, "没有扫描到可读取点位。请确认 S7-200 SMART 已允许 S7 通信，并确认 V/M/I/Q 区域存在可访问地址。")
 	}
+	if filteredZeroCount > 0 {
+		warnings = append(warnings, fmt.Sprintf("已隐藏 %d 个当前值为 0 的数值型点位。", filteredZeroCount))
+	}
 	warnings = append(warnings, "普通 S7 通信不能读取 PLC 程序里的变量名，候选点位名称已按地址自动生成。")
 	return points, warnings
+}
+
+func isZeroNumericS7ScanValue(point config.PointConfig, value interface{}) bool {
+	if point.DataType == "bool" {
+		return false
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed == 0
+	case int8:
+		return typed == 0
+	case int16:
+		return typed == 0
+	case int32:
+		return typed == 0
+	case int64:
+		return typed == 0
+	case uint:
+		return typed == 0
+	case uint8:
+		return typed == 0
+	case uint16:
+		return typed == 0
+	case uint32:
+		return typed == 0
+	case uint64:
+		return typed == 0
+	case float32:
+		return typed == 0
+	case float64:
+		return typed == 0
+	default:
+		return false
+	}
 }
 
 func s7ScanStep(dataType string) uint16 {
