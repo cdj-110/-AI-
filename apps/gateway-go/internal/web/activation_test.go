@@ -13,6 +13,7 @@ import (
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 	"weikong-iot-platform/apps/gateway-go/internal/hardware"
+	"weikong-iot-platform/apps/gateway-go/internal/state"
 )
 
 func TestSaveActivationDoesNotWaitForConfigApply(t *testing.T) {
@@ -57,5 +58,44 @@ func TestSaveActivationDoesNotWaitForConfigApply(t *testing.T) {
 	close(applyBlocked)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestSaveDisabledActivationResetsStatusImmediately(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	activationPath := filepath.Join(tempDir, "activation.json")
+	if err := os.WriteFile(activationPath, []byte(`{"enabled":true,"hardwareId":"TEST-HARDWARE","sn":"TEST-SN","deviceSecret":"secret","broker":"tcp://127.0.0.1:1883"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf(`{"gatewayKey":"test","activation":{"enabled":true,"file":%q},"mqtt":{"enabled":false}}`, activationPath)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.New(cfg)
+	store.SetMQTTChannelConnected("activation", true)
+
+	body, err := json.Marshal(map[string]string{
+		"file":    activationPath,
+		"content": `{"enabled":false}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{configPath: configPath, store: store, onConfig: func(config.Config) {}}
+	request := httptest.NewRequest(http.MethodPut, "/api/activation", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+
+	server.saveActivation(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	channel := store.Snapshot().MQTTChannels["activation"]
+	if channel.Enabled || channel.Connected {
+		t.Fatalf("activation status = enabled %v connected %v, want disabled and disconnected", channel.Enabled, channel.Connected)
 	}
 }

@@ -17,6 +17,7 @@ type Config struct {
 	OfflineCache           OfflineCacheConfig `json:"offlineCache,omitempty"`
 	Activation             ActivationConfig   `json:"activation,omitempty"`
 	MQTT                   MQTTConfig         `json:"mqtt"`
+	MQTTChannels           []MQTTConfig       `json:"mqttChannels,omitempty"`
 	Resources              []ResourceConfig   `json:"resources,omitempty"`
 	Channels               []ChannelConfig    `json:"channels,omitempty"`
 	SerialPorts            []SerialPort       `json:"serialPorts,omitempty"`
@@ -34,6 +35,7 @@ type OfflineCacheConfig struct {
 }
 
 type MQTTConfig struct {
+	Name            string `json:"name,omitempty"`
 	Enabled         *bool  `json:"enabled,omitempty"`
 	Broker          string `json:"broker"`
 	ClientID        string `json:"clientId"`
@@ -99,6 +101,7 @@ type ChannelConfig struct {
 	Name                   string         `json:"name"`
 	Type                   string         `json:"type"`
 	Protocol               string         `json:"protocol"`
+	ForwardProtocol        string         `json:"forwardProtocol,omitempty"`
 	CollectIntervalSeconds int            `json:"collectIntervalSeconds,omitempty"`
 	InterfaceName          string         `json:"interfaceName,omitempty"`
 	Enabled                bool           `json:"enabled"`
@@ -165,8 +168,10 @@ type DeviceConfig struct {
 }
 
 type FeatureConfig struct {
-	Enabled bool   `json:"enabled"`
-	Listen  string `json:"listen"`
+	Enabled      bool   `json:"enabled"`
+	Listen       string `json:"listen"`
+	ModbusListen string `json:"modbusListen,omitempty"`
+	IEC104Listen string `json:"iec104Listen,omitempty"`
 }
 
 type ListenerConfig struct {
@@ -202,8 +207,10 @@ func Parse(raw []byte) (Config, error) {
 	if cfg.OfflineCache.Enabled && (cfg.OfflineCache.MaxSizeMB < 12 || cfg.OfflineCache.MaxSizeMB > 16) {
 		return Config{}, fmt.Errorf("offline cache maxSizeMB must be between 12 and 16")
 	}
-	if cfg.MQTT.IsEnabled() && (cfg.MQTT.Broker == "" || cfg.MQTT.ClientID == "" || cfg.MQTT.Username == "") {
-		return Config{}, fmt.Errorf("mqtt broker/clientId/username are required")
+	for _, channel := range cfg.ManualMQTTChannels() {
+		if channel.IsEnabled() && (channel.Broker == "" || channel.ClientID == "" || channel.Username == "") {
+			return Config{}, fmt.Errorf("mqtt broker/clientId/username are required")
+		}
 	}
 	return cfg, nil
 }
@@ -324,7 +331,11 @@ func (c *Config) ApplyDefaults() {
 	if c.OfflineCache.MaxSizeMB == 0 {
 		c.OfflineCache.MaxSizeMB = 16
 	}
+	c.ForwardSlave.ApplyDefaults()
 	c.MQTT.ApplyDefaults()
+	for i := range c.MQTTChannels {
+		c.MQTTChannels[i].ApplyDefaults()
+	}
 	if len(c.SerialPorts) == 0 {
 		c.SerialPorts = []SerialPort{
 			{Name: "Serial1", Port: "COM1", Enabled: true},
@@ -345,6 +356,7 @@ func (c *Config) ApplyDefaults() {
 	}
 	c.ApplyResourceDefaults()
 	c.ApplyChannelDefaults()
+	c.ApplyForwardDefaults()
 	if len(c.Devices) > 0 {
 		hadDevices = true
 	}
@@ -463,6 +475,9 @@ func (c *Config) ApplyChannelDefaults() {
 		if channel.Protocol == "" {
 			channel.Protocol = "modbus-tcp"
 		}
+		if channel.ForwardProtocol == "" {
+			channel.ForwardProtocol = "none"
+		}
 		if channel.CollectIntervalSeconds <= 0 {
 			channel.CollectIntervalSeconds = c.CollectIntervalSeconds
 		}
@@ -540,6 +555,16 @@ func (c *Config) ApplyChannelDefaults() {
 	}
 }
 
+func (c *Config) ApplyForwardDefaults() {
+	c.ForwardSlave.ApplyDefaults()
+	for _, channel := range c.Channels {
+		if channel.ForwardProtocol != "" && channel.ForwardProtocol != "none" {
+			c.ForwardSlave.Enabled = true
+			return
+		}
+	}
+}
+
 func (c Config) channelsFromLegacyConfig() []ChannelConfig {
 	var channels []ChannelConfig
 	for _, resource := range c.Resources {
@@ -561,6 +586,18 @@ func (c Config) channelsFromLegacyConfig() []ChannelConfig {
 		})
 	}
 	return channels
+}
+
+func (f *FeatureConfig) ApplyDefaults() {
+	if f.Listen == "" {
+		f.Listen = "0.0.0.0:1502"
+	}
+	if f.ModbusListen == "" {
+		f.ModbusListen = f.Listen
+	}
+	if f.IEC104Listen == "" {
+		f.IEC104Listen = "0.0.0.0:2404"
+	}
 }
 
 func (c Config) resourcesFromLegacyConfig() []ResourceConfig {
@@ -731,6 +768,9 @@ func (p *NetworkPort) ApplyDefaults() {
 }
 
 func (m *MQTTConfig) ApplyDefaults() {
+	if m.Name == "" {
+		m.Name = "手动 MQTT"
+	}
 	if m.TopicTemplate == "" {
 		m.TopicTemplate = "attributes"
 	}
@@ -748,6 +788,7 @@ func (m MQTTConfig) IsEnabled() bool {
 
 func (m MQTTConfig) Equal(other MQTTConfig) bool {
 	return m.IsEnabled() == other.IsEnabled() &&
+		m.Name == other.Name &&
 		m.Broker == other.Broker &&
 		m.ClientID == other.ClientID &&
 		m.Username == other.Username &&
@@ -755,6 +796,50 @@ func (m MQTTConfig) Equal(other MQTTConfig) bool {
 		m.TopicTemplate == other.TopicTemplate &&
 		m.PayloadMode == other.PayloadMode &&
 		m.PayloadTemplate == other.PayloadTemplate
+}
+
+func (c Config) ManualMQTTChannels() []MQTTConfig {
+	if len(c.MQTTChannels) > 0 {
+		channels := make([]MQTTConfig, 0, len(c.MQTTChannels))
+		for index, channel := range c.MQTTChannels {
+			if channel.Name == "" {
+				channel.Name = fmt.Sprintf("手动 MQTT %d", index+1)
+			}
+			channel.ApplyDefaults()
+			channels = append(channels, channel)
+		}
+		return channels
+	}
+	if !c.MQTT.IsEnabled() {
+		return nil
+	}
+	channel := c.MQTT
+	if channel.Name == "" {
+		channel.Name = "手动 MQTT 1"
+	}
+	channel.ApplyDefaults()
+	return []MQTTConfig{channel}
+}
+
+func (c Config) ManualMQTTEnabled() bool {
+	for _, channel := range c.ManualMQTTChannels() {
+		if channel.IsEnabled() {
+			return true
+		}
+	}
+	return false
+}
+
+func EqualMQTTChannels(left, right []MQTTConfig) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !left[index].Equal(right[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a ActivationConfig) IsEnabled() bool {
@@ -839,7 +924,7 @@ func applyChannelConnection(device *DeviceConfig, channel ChannelConfig) {
 
 func applyChannelPointDefaults(point *PointConfig, channel ChannelConfig) {
 	point.ChannelKey = channel.ChannelKey
-	if point.CollectIntervalSeconds <= 0 {
+	if channel.CollectIntervalSeconds > 0 {
 		point.CollectIntervalSeconds = channel.CollectIntervalSeconds
 	}
 }

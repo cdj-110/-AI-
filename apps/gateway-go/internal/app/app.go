@@ -13,6 +13,7 @@ import (
 	"weikong-iot-platform/apps/gateway-go/internal/cache"
 	"weikong-iot-platform/apps/gateway-go/internal/cloud"
 	"weikong-iot-platform/apps/gateway-go/internal/config"
+	"weikong-iot-platform/apps/gateway-go/internal/forward"
 	"weikong-iot-platform/apps/gateway-go/internal/model"
 	gatewayruntime "weikong-iot-platform/apps/gateway-go/internal/runtime"
 	"weikong-iot-platform/apps/gateway-go/internal/state"
@@ -30,6 +31,7 @@ type App struct {
 	spool         *cache.Spool
 	state         *state.Store
 	runtime       *gatewayruntime.Manager
+	forward       *forward.Manager
 	collectSem    chan struct{}
 	configChanged chan struct{}
 }
@@ -44,6 +46,7 @@ func New(cfg config.Config, configPath string) *App {
 		spool:         offlineSpool(cfg),
 		state:         store,
 		runtime:       manager,
+		forward:       forward.NewManager(store),
 		collectSem:    make(chan struct{}, 1),
 		configChanged: make(chan struct{}, 1),
 	}
@@ -53,6 +56,8 @@ func (a *App) Run(ctx context.Context) error {
 	go web.New(a.cfg.Web, a.state, a.runtime, a.configPath, a.ApplyConfig).Run(ctx)
 	a.syncCloud(a.cfg)
 	defer a.disconnectCloud()
+	a.forward.Update(ctx, a.cfg)
+	defer a.forward.Stop()
 
 	log.Printf("gateway %s started, points=%d", a.cfg.GatewayKey, len(a.cfg.Points))
 	go a.heartbeatLoop(ctx)
@@ -110,11 +115,12 @@ func (a *App) publishGatewayHeartbeat() {
 func (a *App) ApplyConfig(cfg config.Config) {
 	oldCfg := a.runtime.Config()
 	a.runtime.UpdateConfig(cfg)
+	a.forward.Update(context.Background(), cfg)
 	a.cfg = cfg
 	a.spoolMu.Lock()
 	a.spool = offlineSpool(cfg)
 	a.spoolMu.Unlock()
-	if !oldCfg.MQTT.Equal(cfg.MQTT) || !oldCfg.Activation.Equal(cfg.Activation) {
+	if !oldCfg.MQTT.Equal(cfg.MQTT) || !config.EqualMQTTChannels(oldCfg.MQTTChannels, cfg.MQTTChannels) || !oldCfg.Activation.Equal(cfg.Activation) {
 		a.syncCloud(cfg)
 	}
 	select {
@@ -249,17 +255,21 @@ func (a *App) syncCloud(cfg config.Config) {
 		log.Printf("activation channel not ready, cloud publish skipped")
 	}
 
-	if cfg.MQTT.IsEnabled() {
-		client := cloud.NewManualMQTT(cfg, a.setCloudChannelConnected("manual"))
+	for index, channel := range cfg.ManualMQTTChannels() {
+		if !channel.IsEnabled() {
+			continue
+		}
+		channelKey := fmt.Sprintf("manual-%d", index+1)
+		client := cloud.NewManualMQTTChannel(channelKey, cfg.GatewayKey, channel, a.setCloudChannelConnected(channelKey))
 		a.clouds = append(a.clouds, client)
 		if err := client.Connect(); err != nil {
-			log.Printf("manual mqtt connect failed: %v", err)
-			a.state.AddError("manual mqtt connect failed: " + err.Error())
+			log.Printf("manual mqtt connect failed channel=%s: %v", channel.Name, err)
+			a.state.AddError("manual mqtt connect failed " + channel.Name + ": " + err.Error())
 		} else {
-			a.setCloudChannelConnectedLocked("manual", client.IsConnected())
+			a.setCloudChannelConnectedLocked(channelKey, client.IsConnected())
 			if !cfg.Activation.IsReady() {
 				if err := client.SubscribeRemoteConfig(a.applyRemoteConfig, a.remoteConfigSnapshot); err != nil {
-					log.Printf("subscribe remote config failed channel=manual: %v", err)
+					log.Printf("subscribe remote config failed channel=%s: %v", channel.Name, err)
 				}
 			}
 		}

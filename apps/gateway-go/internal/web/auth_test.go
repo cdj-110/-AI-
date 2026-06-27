@@ -8,10 +8,11 @@ import (
 	"testing"
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
+	"weikong-iot-platform/apps/gateway-go/internal/state"
 )
 
 func TestProtectedRoutesRequireLogin(t *testing.T) {
-	server := New(configForAuthTest(), nil, nil, "", nil)
+	server := newAuthTestServer()
 
 	pageResponse := httptest.NewRecorder()
 	server.routes().ServeHTTP(pageResponse, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -20,14 +21,24 @@ func TestProtectedRoutesRequireLogin(t *testing.T) {
 	}
 
 	apiResponse := httptest.NewRecorder()
-	server.routes().ServeHTTP(apiResponse, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	server.routes().ServeHTTP(apiResponse, httptest.NewRequest(http.MethodGet, "/api/config", nil))
 	if apiResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("API status = %d, want %d", apiResponse.Code, http.StatusUnauthorized)
+		t.Fatalf("protected API status = %d, want %d", apiResponse.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestStatusIsPublic(t *testing.T) {
+	server := newAuthTestServer()
+
+	response := httptest.NewRecorder()
+	server.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status response = %d, want %d", response.Code, http.StatusOK)
 	}
 }
 
 func TestDefaultCredentialsCreateSession(t *testing.T) {
-	server := New(configForAuthTest(), nil, nil, "", nil)
+	server := newAuthTestServer()
 	form := url.Values{"username": {"admin"}, "password": {"123456"}, "next": {"/"}}
 	request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -51,7 +62,7 @@ func TestDefaultCredentialsCreateSession(t *testing.T) {
 }
 
 func TestInvalidCredentialsAreRejected(t *testing.T) {
-	server := New(configForAuthTest(), nil, nil, "", nil)
+	server := newAuthTestServer()
 	form := url.Values{"username": {"admin"}, "password": {"wrong"}}
 	request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -64,4 +75,10 @@ func TestInvalidCredentialsAreRejected(t *testing.T) {
 
 func configForAuthTest() config.ListenerConfig {
 	return config.ListenerConfig{Enabled: true, Listen: "127.0.0.1:8088"}
+}
+
+func newAuthTestServer() *Server {
+	cfg := config.Config{GatewayKey: "test-gateway"}
+	cfg.ApplyDefaults()
+	return New(configForAuthTest(), state.New(cfg), nil, "", nil)
 }

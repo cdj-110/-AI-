@@ -22,6 +22,8 @@ type connectionTestRequest struct {
 	Slot       uint8  `json:"slot"`
 	LocalTSAP  string `json:"localTsap"`
 	RemoteTSAP string `json:"remoteTsap"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
 }
 
 func (s *Server) testConnection(writer http.ResponseWriter, request *http.Request) {
@@ -77,6 +79,26 @@ func (s *Server) testConnection(writer http.ResponseWriter, request *http.Reques
 			"ok":      true,
 			"address": result.Address,
 			"message": fmt.Sprintf("连接成功，已完成 IEC104 STARTDT 握手。公共地址：%d", result.CommonAddress),
+		})
+		return
+	}
+
+	if body.Protocol == "opcua" {
+		result, err := collector.TestOPCUAConnection(ctx, config.PointConfig{
+			Protocol: "opcua",
+			Address:  body.Address,
+			Username: body.Username,
+			Password: body.Password,
+		})
+		if err != nil {
+			writer.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(writer).Encode(map[string]interface{}{"ok": false, "address": result.Endpoint, "message": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]interface{}{
+			"ok":      true,
+			"address": result.Endpoint,
+			"message": "OPC UA 连接成功，已完成端点握手。",
 		})
 		return
 	}

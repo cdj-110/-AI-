@@ -14,13 +14,13 @@ func TestMQTTChannelsRemainIndependent(t *testing.T) {
 		MQTT:       config.MQTTConfig{Enabled: &enabled},
 	}
 	store := New(cfg)
-	store.SetMQTTChannelConnected("manual", true)
+	store.SetMQTTChannelConnected("manual-1", true)
 
 	snapshot := store.Snapshot()
 	if snapshot.MQTTChannels["activation"].Connected {
 		t.Fatal("activation channel must remain disconnected")
 	}
-	if !snapshot.MQTTChannels["manual"].Connected {
+	if !snapshot.MQTTChannels["manual-1"].Connected {
 		t.Fatal("manual channel should be connected")
 	}
 	if !snapshot.MQTTConnected {

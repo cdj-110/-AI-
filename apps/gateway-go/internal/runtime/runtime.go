@@ -130,9 +130,9 @@ func retryDelay(interval time.Duration) time.Duration {
 	if interval <= 0 {
 		interval = time.Second
 	}
-	delay := interval * 5
-	if delay < 15*time.Second {
-		delay = 15 * time.Second
+	delay := interval * 3
+	if delay < interval {
+		delay = interval
 	}
 	if delay > 30*time.Second {
 		delay = 30 * time.Second
@@ -162,7 +162,7 @@ func maxPointCollectInterval(points []config.PointConfig, fallback time.Duration
 
 func collectTimeout(interval time.Duration) time.Duration {
 	if interval <= time.Second {
-		return 700 * time.Millisecond
+		return 950 * time.Millisecond
 	}
 	timeout := interval - 250*time.Millisecond
 	if timeout < time.Second {

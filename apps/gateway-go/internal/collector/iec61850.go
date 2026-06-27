@@ -17,12 +17,25 @@ type IEC61850ConnectionResult struct {
 	Address string
 }
 
+type IEC61850BrowseNode struct {
+	Name      string               `json:"name"`
+	ObjectRef string               `json:"objectRef"`
+	FC        string               `json:"fc"`
+	DataType  string               `json:"dataType,omitempty"`
+	Leaf      bool                 `json:"leaf"`
+	Children  []IEC61850BrowseNode `json:"children,omitempty"`
+}
+
 func (IEC61850) ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
 	objectRef := strings.TrimSpace(point.ObjectRef)
 	if objectRef == "" {
-		return model.PointValue{}, fmt.Errorf("IEC61850 对象引用不能为空，例如 LD0/LLN0.Mod.stVal")
+		return model.PointValue{}, fmt.Errorf("IEC61850 objectRef is required, for example LD0/LLN0.Mod.stVal")
 	}
-	return model.PointValue{}, fmt.Errorf("IEC61850 MMS 读取暂未启用：已完成配置入口和连接测试，请接入 MMS 协议栈后读取 %s[%s]", objectRef, valueOrDefault(point.FC, "ST"))
+	value, err := readIEC61850Point(ctx, point, objectRef, valueOrDefault(point.FC, "ST"))
+	if err != nil {
+		return model.PointValue{}, err
+	}
+	return model.PointValue{DeviceKey: point.DeviceKey, Metric: point.Metric, Value: value}, nil
 }
 
 func TestIEC61850Connection(ctx context.Context, address string) (IEC61850ConnectionResult, error) {
@@ -31,7 +44,7 @@ func TestIEC61850Connection(ctx context.Context, address string) (IEC61850Connec
 	dialer := net.Dialer{Timeout: 3 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
-		return result, fmt.Errorf("IEC61850 连接失败 %s：%w", address, err)
+		return result, fmt.Errorf("IEC61850 connection failed %s: %w", address, err)
 	}
 	_ = conn.Close()
 	return result, nil

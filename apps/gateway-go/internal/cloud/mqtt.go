@@ -13,6 +13,7 @@ import (
 
 type Client struct {
 	name            string
+	manual          bool
 	gatewayKey      string
 	hardwareID      string
 	topicTemplate   string
@@ -43,19 +44,25 @@ type MQTTOptions struct {
 	TopicTemplate   string
 	PayloadMode     string
 	PayloadTemplate string
+	Manual          bool
 }
 
 func NewManualMQTT(cfg config.Config, onConnectionChanged func(bool)) *Client {
+	return NewManualMQTTChannel("manual", cfg.GatewayKey, cfg.MQTT, onConnectionChanged)
+}
+
+func NewManualMQTTChannel(name string, gatewayKey string, channel config.MQTTConfig, onConnectionChanged func(bool)) *Client {
 	return NewMQTT(MQTTOptions{
-		Name:            "manual",
-		Broker:          cfg.MQTT.Broker,
-		ClientID:        cfg.MQTT.ClientID,
-		Username:        cfg.MQTT.Username,
-		Password:        cfg.MQTT.Password,
-		GatewayKey:      cfg.GatewayKey,
-		TopicTemplate:   cfg.MQTT.TopicTemplate,
-		PayloadMode:     cfg.MQTT.PayloadMode,
-		PayloadTemplate: cfg.MQTT.PayloadTemplate,
+		Name:            name,
+		Broker:          channel.Broker,
+		ClientID:        channel.ClientID,
+		Username:        channel.Username,
+		Password:        channel.Password,
+		GatewayKey:      gatewayKey,
+		TopicTemplate:   channel.TopicTemplate,
+		PayloadMode:     channel.PayloadMode,
+		PayloadTemplate: channel.PayloadTemplate,
+		Manual:          true,
 	}, onConnectionChanged)
 }
 
@@ -93,6 +100,7 @@ func NewMQTT(opts MQTTOptions, onConnectionChanged func(bool)) *Client {
 
 	return &Client{
 		name:            opts.Name,
+		manual:          opts.Manual,
 		gatewayKey:      opts.GatewayKey,
 		hardwareID:      opts.HardwareID,
 		topicTemplate:   defaultString(opts.TopicTemplate, "attributes"),
@@ -157,7 +165,7 @@ func (c *Client) Name() string {
 }
 
 func (c *Client) IsManual() bool {
-	return c.name == "manual"
+	return c.manual
 }
 
 func (c *Client) Connect() error {

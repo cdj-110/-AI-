@@ -1,4 +1,5 @@
-﻿package web
+package web
+
 import (
 	"context"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	gatewayruntime "weikong-iot-platform/apps/gateway-go/internal/runtime"
 	"weikong-iot-platform/apps/gateway-go/internal/state"
 )
+
 type Server struct {
 	auth       *authManager
 	cfg        config.ListenerConfig
@@ -60,7 +62,6 @@ func (s *Server) Run(ctx context.Context) {
 func (s *Server) routes() http.Handler {
 	protected := http.NewServeMux()
 	protected.HandleFunc("/", s.index)
-	protected.HandleFunc("/api/status", s.status)
 	protected.HandleFunc("/api/config", s.configFile)
 	protected.HandleFunc("/api/activation", s.activationFile)
 	protected.HandleFunc("/api/collect-now", s.collectNow)
@@ -70,11 +71,13 @@ func (s *Server) routes() http.Handler {
 	protected.HandleFunc("/api/s7-connection/test", s.testS7Connection)
 	protected.HandleFunc("/api/connection/test", s.testConnection)
 	protected.HandleFunc("/api/opcua/browse", s.browseOPCUA)
+	protected.HandleFunc("/api/iec61850/browse", s.browseIEC61850)
 	protected.HandleFunc("/api/network/interfaces", s.networkInterfaces)
 	protected.HandleFunc("/api/network/apply", s.applyNetworkInterface)
 	protected.HandleFunc("/api/storage", s.storageStatus)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", s.status)
 	mux.HandleFunc("/login", s.login)
 	mux.HandleFunc("/logout", s.logout)
 	mux.Handle("/", s.requireAuth(protected))
@@ -110,7 +113,7 @@ func (s *Server) saveConfig(writer http.ResponseWriter, request *http.Request) {
 	var body struct {
 		Content string `json:"content"`
 	}
-	raw, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 1024*1024))
+	raw, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32*1024*1024))
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
@@ -142,11 +145,12 @@ func (s *Server) collectNow(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	s.runtime.CollectOnce(request.Context())
+	collectCtx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
+	defer cancel()
+	s.runtime.CollectOnce(collectCtx)
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(writer).Encode(s.store.Snapshot())
 }
-
 
 func (s *Server) activationFile(writer http.ResponseWriter, request *http.Request) {
 	switch request.Method {
@@ -200,14 +204,14 @@ func (s *Server) saveActivation(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	identity := hardware.ReadIdentity()
-	if activation.HardwareID == "" {
+	if activation.IsEnabled() && activation.HardwareID == "" {
 		activation.HardwareID = identity.ID
 	}
-	if activation.HardwareID == "" || activation.SN == "" || activation.DeviceSecret == "" || activation.Broker == "" {
+	if activation.IsEnabled() && (activation.HardwareID == "" || activation.SN == "" || activation.DeviceSecret == "" || activation.Broker == "") {
 		http.Error(writer, "activation requires hardwareId, sn, deviceSecret and broker", http.StatusBadRequest)
 		return
 	}
-	if identity.Available && !strings.EqualFold(activation.HardwareID, identity.ID) {
+	if activation.IsEnabled() && identity.Available && !strings.EqualFold(activation.HardwareID, identity.ID) {
 		http.Error(writer, "activation hardwareId does not match this gateway", http.StatusBadRequest)
 		return
 	}
@@ -242,6 +246,9 @@ func (s *Server) saveActivation(writer http.ResponseWriter, request *http.Reques
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if s.store != nil {
+		s.store.ResetMQTTChannels(activatedCfg)
+	}
 	if s.onConfig != nil {
 		go s.onConfig(activatedCfg)
 	} else {
@@ -273,12 +280,19 @@ func (s *Server) testMQTTPublish(writer http.ResponseWriter, request *http.Reque
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !cfg.MQTT.IsEnabled() {
+	var channel config.MQTTConfig
+	for _, current := range cfg.ManualMQTTChannels() {
+		if current.IsEnabled() {
+			channel = current
+			break
+		}
+	}
+	if !channel.IsEnabled() {
 		http.Error(writer, "manual mqtt channel is disabled", http.StatusBadRequest)
 		return
 	}
-	cfg.MQTT.ClientID = cfg.MQTT.ClientID + "_test_" + strconv.FormatInt(time.Now().UnixMilli(), 10)
-	client := cloud.NewManualMQTT(cfg, nil)
+	channel.ClientID = channel.ClientID + "_test_" + strconv.FormatInt(time.Now().UnixMilli(), 10)
+	client := cloud.NewManualMQTTChannel("manual-test", cfg.GatewayKey, channel, nil)
 	if err := client.Connect(); err != nil {
 		http.Error(writer, "mqtt connect failed: "+err.Error(), http.StatusBadRequest)
 		return

@@ -93,8 +93,16 @@ func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	auth := s.authState()
-	usernameOK := subtle.ConstantTimeCompare([]byte(request.FormValue("username")), []byte(auth.username)) == 1
-	passwordOK := subtle.ConstantTimeCompare([]byte(request.FormValue("password")), []byte(auth.password)) == 1
+	username := request.FormValue("gateway_user")
+	if username == "" {
+		username = request.FormValue("username")
+	}
+	password := request.FormValue("gateway_pass")
+	if password == "" {
+		password = request.FormValue("password")
+	}
+	usernameOK := subtle.ConstantTimeCompare([]byte(username), []byte(auth.username)) == 1
+	passwordOK := subtle.ConstantTimeCompare([]byte(password), []byte(auth.password)) == 1
 	if !usernameOK || !passwordOK {
 		s.renderLogin(writer, request.FormValue("next"), "账号或密码错误", http.StatusUnauthorized)
 		return
@@ -176,10 +184,10 @@ const loginHTML = `<!doctype html>
 <body>
   <main class="login-card">
     <div class="brand"><span class="mark"></span><div><h1>微控网关</h1><p class="subtitle">Edge Gateway Management</p></div></div>
-    <form method="post" action="/login">
+    <form method="post" action="/login" autocomplete="off">
       <input type="hidden" name="next" value="{{.Next}}" />
-      <label>账号<input name="username" autocomplete="username" autofocus required /></label>
-      <label>密码<input name="password" type="password" autocomplete="current-password" required /></label>
+      <label>账号<input name="gateway_user" autocomplete="off" autocapitalize="none" spellcheck="false" autofocus required /></label>
+      <label>密码<input name="gateway_pass" type="password" autocomplete="new-password" required /></label>
       {{if .Message}}<p class="error">{{.Message}}</p>{{end}}
       <button type="submit">登录</button>
     </form>

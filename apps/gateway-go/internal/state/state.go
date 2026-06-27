@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -45,8 +46,9 @@ type Event struct {
 }
 
 type MQTTChannelStatus struct {
-	Enabled   bool `json:"enabled"`
-	Connected bool `json:"connected"`
+	Enabled   bool   `json:"enabled"`
+	Connected bool   `json:"connected"`
+	Name      string `json:"name,omitempty"`
 }
 
 type Snapshot struct {
@@ -87,8 +89,8 @@ func New(cfg config.Config) *Store {
 		startedAt:      time.Now(),
 		gatewayKey:     cfg.GatewayKey,
 		hardwareID:     hardware.ReadIdentity(),
-		collectSeconds: cfg.CollectIntervalSeconds,
-		mqttEnabled:    cfg.MQTT.IsEnabled() || cfg.Activation.IsEnabled(),
+		collectSeconds: collectSecondsForConfig(cfg),
+		mqttEnabled:    cfg.ManualMQTTEnabled() || cfg.Activation.IsEnabled(),
 		mqttChannels:   mqttChannelsForConfig(cfg),
 		points:         points,
 		pointOrder:     pointOrder,
@@ -105,7 +107,7 @@ func (s *Store) ResetMQTTChannels(cfg config.Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mqttChannels = mqttChannelsForConfig(cfg)
-	s.mqttEnabled = cfg.MQTT.IsEnabled() || cfg.Activation.IsEnabled()
+	s.mqttEnabled = cfg.ManualMQTTEnabled() || cfg.Activation.IsEnabled()
 	s.mqttConnected = false
 }
 
@@ -128,8 +130,8 @@ func (s *Store) ReplaceConfig(cfg config.Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gatewayKey = cfg.GatewayKey
-	s.collectSeconds = cfg.CollectIntervalSeconds
-	s.mqttEnabled = cfg.MQTT.IsEnabled() || cfg.Activation.IsEnabled()
+	s.collectSeconds = collectSecondsForConfig(cfg)
+	s.mqttEnabled = cfg.ManualMQTTEnabled() || cfg.Activation.IsEnabled()
 	next := make(map[string]PointStatus, len(cfg.Points))
 	pointOrder := make([]string, 0, len(cfg.Points))
 	for _, point := range cfg.Points {
@@ -147,6 +149,14 @@ func (s *Store) ReplaceConfig(cfg config.Config) {
 	}
 	s.points = next
 	s.pointOrder = pointOrder
+}
+
+func collectSecondsForConfig(cfg config.Config) int {
+	seconds := int(cfg.CollectInterval().Seconds())
+	if seconds <= 0 {
+		return 1
+	}
+	return seconds
 }
 
 func (s *Store) MarkCollect() {
@@ -248,10 +258,13 @@ func (s *Store) Snapshot() Snapshot {
 }
 
 func mqttChannelsForConfig(cfg config.Config) map[string]MQTTChannelStatus {
-	return map[string]MQTTChannelStatus{
+	channels := map[string]MQTTChannelStatus{
 		"activation": {Enabled: cfg.Activation.IsEnabled()},
-		"manual":     {Enabled: cfg.MQTT.IsEnabled()},
 	}
+	for index, channel := range cfg.ManualMQTTChannels() {
+		channels[fmt.Sprintf("manual-%d", index+1)] = MQTTChannelStatus{Enabled: channel.IsEnabled(), Name: channel.Name}
+	}
+	return channels
 }
 
 func copyMQTTChannels(source map[string]MQTTChannelStatus) map[string]MQTTChannelStatus {
