@@ -31,6 +31,14 @@ func TestDecodeLittleEndianUint16(t *testing.T) {
 	assertFloat(t, value, 1000)
 }
 
+func TestDecodeRoundsScaledValueByDecimals(t *testing.T) {
+	value, err := Decode(config.PointConfig{DataType: "uint16", ByteOrder: "big", WordOrder: "normal", Scale: 0.1, Decimals: 1}, []byte{0x01, 0xee})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFloat(t, value, 49.4)
+}
+
 func TestDecodeBitBool(t *testing.T) {
 	bit := uint8(3)
 	value, err := Decode(config.PointConfig{DataType: "bool", ByteOrder: "big", WordOrder: "normal", BitIndex: &bit}, []byte{0x00, 0x08})

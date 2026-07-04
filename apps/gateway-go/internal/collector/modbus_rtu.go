@@ -46,6 +46,24 @@ func (ModbusRTU) ReadRegisterRange(ctx context.Context, point config.PointConfig
 	return readRTU(ctx, rangePoint)
 }
 
+func (ModbusRTU) WritePoint(ctx context.Context, point config.PointConfig, value interface{}) error {
+	if point.Address == "" {
+		return fmt.Errorf("modbus RTU serial port is required")
+	}
+	bus, err := getRTUBus(point)
+	if err != nil {
+		return err
+	}
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	bus.handler.SlaveId = point.SlaveID
+	if err := writeByFunction(ctx, bus.client, point, value); err != nil {
+		_ = bus.handler.Close()
+		return fmt.Errorf("Modbus RTU %s slave %d write failed: %w", point.Address, point.SlaveID, err)
+	}
+	return nil
+}
+
 func readRTU(ctx context.Context, point config.PointConfig) ([]byte, error) {
 	if point.Address == "" {
 		return nil, fmt.Errorf("modbus RTU serial port is required")

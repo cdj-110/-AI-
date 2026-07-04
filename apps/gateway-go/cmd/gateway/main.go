@@ -6,13 +6,24 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"weikong-iot-platform/apps/gateway-go/internal/app"
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 )
 
+const restartDelayEnv = "GATEWAY_RESTART_DELAY_MS"
+
 func main() {
+	if delayText := os.Getenv(restartDelayEnv); delayText != "" {
+		_ = os.Unsetenv(restartDelayEnv)
+		if delayMS, err := strconv.Atoi(delayText); err == nil && delayMS > 0 {
+			time.Sleep(time.Duration(delayMS) * time.Millisecond)
+		}
+	}
+
 	configPath := flag.String("config", "config.local.json", "gateway config file path")
 	flag.Parse()
 

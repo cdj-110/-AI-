@@ -22,10 +22,13 @@ type Config struct {
 	Channels               []ChannelConfig    `json:"channels,omitempty"`
 	SerialPorts            []SerialPort       `json:"serialPorts,omitempty"`
 	NetworkPorts           []NetworkPort      `json:"networkPorts,omitempty"`
+	WiFi                   WiFiConfig         `json:"wifi,omitempty"`
+	Cellular               CellularConfig     `json:"cellular,omitempty"`
 	Devices                []DeviceConfig     `json:"devices,omitempty"`
 	Points                 []PointConfig      `json:"points,omitempty"`
 	ForwardSlave           FeatureConfig      `json:"forwardSlave"`
 	Web                    ListenerConfig     `json:"web"`
+	Security               SecurityConfig     `json:"security,omitempty"`
 }
 
 type OfflineCacheConfig struct {
@@ -44,6 +47,7 @@ type MQTTConfig struct {
 	TopicTemplate   string `json:"topicTemplate,omitempty"`
 	PayloadMode     string `json:"payloadMode,omitempty"`
 	PayloadTemplate string `json:"payloadTemplate,omitempty"`
+	SubscribeTopic  string `json:"subscribeTopic,omitempty"`
 }
 
 type ActivationConfig struct {
@@ -86,6 +90,27 @@ type NetworkPort struct {
 	Enabled      bool     `json:"enabled"`
 }
 
+type WiFiConfig struct {
+	Enabled      bool     `json:"enabled"`
+	Interface    string   `json:"interface,omitempty"`
+	SSID         string   `json:"ssid,omitempty"`
+	Password     string   `json:"password,omitempty"`
+	Mode         string   `json:"mode,omitempty"`
+	IPAddress    string   `json:"ipAddress,omitempty"`
+	PrefixLength int      `json:"prefixLength,omitempty"`
+	Gateway      string   `json:"gateway,omitempty"`
+	DNS          []string `json:"dns,omitempty"`
+}
+
+type CellularConfig struct {
+	Enabled   *bool  `json:"enabled,omitempty"`
+	Interface string `json:"interface,omitempty"`
+}
+
+func (c CellularConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
 type ResourceConfig struct {
 	ResourceKey string       `json:"resourceKey"`
 	Name        string       `json:"name"`
@@ -103,11 +128,21 @@ type ChannelConfig struct {
 	Protocol               string         `json:"protocol"`
 	ForwardProtocol        string         `json:"forwardProtocol,omitempty"`
 	CollectIntervalSeconds int            `json:"collectIntervalSeconds,omitempty"`
+	IEC104                 IEC104Config   `json:"iec104,omitempty"`
 	InterfaceName          string         `json:"interfaceName,omitempty"`
 	Enabled                bool           `json:"enabled"`
 	Serial                 *SerialPort    `json:"serial,omitempty"`
 	Network                *NetworkPort   `json:"network,omitempty"`
 	Devices                []DeviceConfig `json:"devices,omitempty"`
+}
+
+type IEC104Config struct {
+	GeneralInterrogationOnStart         bool `json:"generalInterrogationOnStart"`
+	GeneralInterrogationIntervalSeconds int  `json:"generalInterrogationIntervalSeconds"`
+	ClockSyncOnStart                    bool `json:"clockSyncOnStart"`
+	ClockSyncIntervalSeconds            int  `json:"clockSyncIntervalSeconds"`
+	CounterInterrogationOnStart         bool `json:"counterInterrogationOnStart"`
+	CounterInterrogationIntervalSeconds int  `json:"counterInterrogationIntervalSeconds"`
 }
 
 type PointConfig struct {
@@ -118,6 +153,7 @@ type PointConfig struct {
 	Metric                 string  `json:"metric"`
 	Protocol               string  `json:"protocol"`
 	Address                string  `json:"address"`
+	PointType              string  `json:"pointType,omitempty"`
 	SlaveID                byte    `json:"slaveId"`
 	Area                   string  `json:"area,omitempty"`
 	DBNumber               uint16  `json:"dbNumber,omitempty"`
@@ -177,6 +213,27 @@ type FeatureConfig struct {
 type ListenerConfig struct {
 	Enabled bool   `json:"enabled"`
 	Listen  string `json:"listen"`
+}
+
+type SecurityConfig struct {
+	Users []UserConfig `json:"users,omitempty"`
+	Roles []RoleConfig `json:"roles,omitempty"`
+}
+
+type UserConfig struct {
+	Username     string `json:"username"`
+	DisplayName  string `json:"displayName,omitempty"`
+	PasswordHash string `json:"passwordHash,omitempty"`
+	RoleKey      string `json:"roleKey"`
+	Enabled      bool   `json:"enabled"`
+}
+
+type RoleConfig struct {
+	RoleKey     string   `json:"roleKey"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Permissions []string `json:"permissions,omitempty"`
+	BuiltIn     bool     `json:"builtIn,omitempty"`
 }
 
 func Load(path string) (Config, error) {
@@ -354,6 +411,8 @@ func (c *Config) ApplyDefaults() {
 	for i := range c.NetworkPorts {
 		c.NetworkPorts[i].ApplyDefaults()
 	}
+	c.WiFi.ApplyDefaults()
+	c.Cellular.ApplyDefaults()
 	c.ApplyResourceDefaults()
 	c.ApplyChannelDefaults()
 	c.ApplyForwardDefaults()
@@ -464,8 +523,10 @@ func (c *Config) ApplyChannelDefaults() {
 		c.Channels = c.channelsFromLegacyConfig()
 		return
 	}
+	usedChannelKeys := map[string]bool{}
 	for i := range c.Channels {
 		channel := &c.Channels[i]
+		originalChannelKey := channel.ChannelKey
 		if channel.ChannelKey == "" {
 			channel.ChannelKey = fmt.Sprintf("channel-%03d", i+1)
 		}
@@ -484,6 +545,14 @@ func (c *Config) ApplyChannelDefaults() {
 		if channel.CollectIntervalSeconds <= 0 {
 			channel.CollectIntervalSeconds = 5
 		}
+		if channel.Protocol == "iec104" {
+			channel.IEC104.ApplyDefaults()
+		}
+		if usedChannelKeys[channel.ChannelKey] {
+			channel.ChannelKey = uniqueChannelKey(channel.ChannelKey, i+1, usedChannelKeys)
+			c.remapDevicesForRenamedChannel(originalChannelKey, channel.ChannelKey, channel.Protocol)
+		}
+		usedChannelKeys[channel.ChannelKey] = true
 		if channel.ResourceKey == "" {
 			channel.ResourceKey = c.defaultResourceKey(channel.Type, channel.Protocol)
 		}
@@ -552,6 +621,59 @@ func (c *Config) ApplyChannelDefaults() {
 			applyChannelConnection(&device, *channel)
 			c.Devices = append(c.Devices, device)
 		}
+	}
+}
+
+func uniqueChannelKey(base string, index int, used map[string]bool) string {
+	if base == "" {
+		base = "channel"
+	}
+	for suffix := 1; ; suffix++ {
+		candidate := fmt.Sprintf("%s-%02d", base, suffix)
+		if index > 0 {
+			candidate = fmt.Sprintf("%s-%02d", base, index+suffix)
+		}
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
+func (c *Config) remapDevicesForRenamedChannel(oldKey string, newKey string, protocol string) {
+	if oldKey == "" || newKey == "" || oldKey == newKey {
+		return
+	}
+	for i := range c.Devices {
+		device := &c.Devices[i]
+		if device.ChannelKey != oldKey {
+			continue
+		}
+		if protocol != "" && device.Protocol != "" && device.Protocol != protocol {
+			continue
+		}
+		device.ChannelKey = newKey
+		for pointIndex := range device.Points {
+			device.Points[pointIndex].ChannelKey = newKey
+		}
+	}
+}
+
+func (i *IEC104Config) ApplyDefaults() {
+	if !i.GeneralInterrogationOnStart && i.GeneralInterrogationIntervalSeconds == 0 && !i.ClockSyncOnStart && i.ClockSyncIntervalSeconds == 0 && !i.CounterInterrogationOnStart && i.CounterInterrogationIntervalSeconds == 0 {
+		i.GeneralInterrogationOnStart = true
+		i.ClockSyncOnStart = true
+		i.ClockSyncIntervalSeconds = 3600
+		i.CounterInterrogationOnStart = true
+		return
+	}
+	if i.ClockSyncIntervalSeconds < 0 {
+		i.ClockSyncIntervalSeconds = 0
+	}
+	if i.GeneralInterrogationIntervalSeconds < 0 {
+		i.GeneralInterrogationIntervalSeconds = 0
+	}
+	if i.CounterInterrogationIntervalSeconds < 0 {
+		i.CounterInterrogationIntervalSeconds = 0
 	}
 }
 
@@ -767,6 +889,24 @@ func (p *NetworkPort) ApplyDefaults() {
 	}
 }
 
+func (w *WiFiConfig) ApplyDefaults() {
+	if w.Interface == "" {
+		w.Interface = "wlan0"
+	}
+	if w.Mode == "" {
+		w.Mode = "dhcp"
+	}
+	if w.PrefixLength == 0 {
+		w.PrefixLength = 24
+	}
+}
+
+func (c *CellularConfig) ApplyDefaults() {
+	if c.Interface == "" {
+		c.Interface = "usbeth0"
+	}
+}
+
 func (m *MQTTConfig) ApplyDefaults() {
 	if m.Name == "" {
 		m.Name = "手动 MQTT"
@@ -795,7 +935,8 @@ func (m MQTTConfig) Equal(other MQTTConfig) bool {
 		m.Password == other.Password &&
 		m.TopicTemplate == other.TopicTemplate &&
 		m.PayloadMode == other.PayloadMode &&
-		m.PayloadTemplate == other.PayloadTemplate
+		m.PayloadTemplate == other.PayloadTemplate &&
+		m.SubscribeTopic == other.SubscribeTopic
 }
 
 func (c Config) ManualMQTTChannels() []MQTTConfig {
@@ -963,6 +1104,13 @@ func (p *PointConfig) ApplyDefaults() {
 	}
 	if p.Protocol == "iec61850" && p.FC == "" {
 		p.FC = "ST"
+	}
+	if p.Protocol == "iec104" && p.PointType == "" {
+		if p.DataType == "single" || p.DataType == "double" {
+			p.PointType = "遥信"
+		} else {
+			p.PointType = "遥测"
+		}
 	}
 	if p.Quantity == 0 {
 		p.Quantity = defaultQuantity(p.DataType)

@@ -63,26 +63,47 @@ func (s *Server) routes() http.Handler {
 	protected := http.NewServeMux()
 	protected.HandleFunc("/", s.index)
 	protected.HandleFunc("/api/config", s.configFile)
-	protected.HandleFunc("/api/activation", s.activationFile)
-	protected.HandleFunc("/api/collect-now", s.collectNow)
-	protected.HandleFunc("/api/mqtt/test-publish", s.testMQTTPublish)
-	protected.HandleFunc("/api/pdf-points/preview", s.previewPDFPoints)
-	protected.HandleFunc("/api/s7-points/scan", s.scanS7Points)
-	protected.HandleFunc("/api/s7-connection/test", s.testS7Connection)
-	protected.HandleFunc("/api/connection/test", s.testConnection)
-	protected.HandleFunc("/api/opcua/browse", s.browseOPCUA)
-	protected.HandleFunc("/api/iec61850/browse", s.browseIEC61850)
-	protected.HandleFunc("/api/network/interfaces", s.networkInterfaces)
-	protected.HandleFunc("/api/network/apply", s.applyNetworkInterface)
-	protected.HandleFunc("/api/storage", s.storageStatus)
+	protected.HandleFunc("/api/activation", s.requirePermission("cloud.manage", s.activationFile))
+	protected.HandleFunc("/api/collect-now", s.requirePermission("config.manage", s.collectNow))
+	protected.HandleFunc("/api/mqtt/test-publish", s.requirePermission("cloud.manage", s.testMQTTPublish))
+	protected.HandleFunc("/api/pdf-points/preview", s.requirePermission("config.manage", s.previewPDFPoints))
+	protected.HandleFunc("/api/iec61850/cid/preview", s.requirePermission("config.manage", s.previewIEC61850CID))
+	protected.HandleFunc("/api/s7-points/scan", s.requirePermission("config.manage", s.scanS7Points))
+	protected.HandleFunc("/api/s7-connection/test", s.requirePermission("config.manage", s.testS7Connection))
+	protected.HandleFunc("/api/connection/test", s.requirePermission("config.manage", s.testConnection))
+	protected.HandleFunc("/api/opcua/browse", s.requirePermission("config.manage", s.browseOPCUA))
+	s.registerOptionalRoutes(protected)
+	protected.HandleFunc("/api/session", s.currentUserFile)
+	protected.HandleFunc("/api/network/interfaces", s.requirePermission("network.manage", s.networkInterfaces))
+	protected.HandleFunc("/api/network/apply", s.requirePermission("network.manage", s.applyNetworkInterface))
+	protected.HandleFunc("/api/network/wifi", s.requirePermission("network.manage", s.wifiNetwork))
+	protected.HandleFunc("/api/network/wifi/scan", s.requirePermission("network.manage", s.scanWiFiNetwork))
+	protected.HandleFunc("/api/network/cellular", s.requirePermission("network.manage", s.cellularNetwork))
+	protected.HandleFunc("/api/storage", s.requirePermission("config.manage", s.storageStatus))
+	protected.HandleFunc("/api/maintenance/ping", s.requirePermission("maintenance.run", s.pingDiagnostic))
+	protected.HandleFunc("/api/maintenance/restart", s.requirePermission("maintenance.run", s.restartService))
+	protected.HandleFunc("/api/maintenance/reboot", s.requirePermission("maintenance.run", s.rebootGateway))
+	protected.HandleFunc("/api/security", s.securityFile)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", s.status)
+	mux.HandleFunc("/brand-logo.png", serveBrandLogo)
 	mux.HandleFunc("/login", s.login)
 	mux.HandleFunc("/logout", s.logout)
 	mux.Handle("/", s.requireAuth(protected))
 	return mux
 }
+
+func (s *Server) requirePermission(permission string, next http.HandlerFunc) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		if !s.hasPermission(request, permission) {
+			http.Error(writer, "forbidden", http.StatusForbidden)
+			return
+		}
+		next(writer, request)
+	}
+}
+
 func (s *Server) status(writer http.ResponseWriter, _ *http.Request) {
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(writer).Encode(s.store.Snapshot())
@@ -91,8 +112,16 @@ func (s *Server) status(writer http.ResponseWriter, _ *http.Request) {
 func (s *Server) configFile(writer http.ResponseWriter, request *http.Request) {
 	switch request.Method {
 	case http.MethodGet:
+		if !s.hasPermission(request, "config.view") && !s.hasPermission(request, "config.manage") {
+			http.Error(writer, "forbidden", http.StatusForbidden)
+			return
+		}
 		s.getConfig(writer)
 	case http.MethodPut:
+		if !s.hasPermission(request, "config.manage") {
+			http.Error(writer, "forbidden", http.StatusForbidden)
+			return
+		}
 		s.saveConfig(writer, request)
 	default:
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
@@ -326,5 +355,6 @@ func latestPointGroups(snapshot state.Snapshot) map[string]map[string]interface{
 }
 func (s *Server) index(writer http.ResponseWriter, _ *http.Request) {
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = writer.Write([]byte(indexHTML))
+	writer.Header().Set("Cache-Control", "no-store")
+	_, _ = writer.Write([]byte(renderIndexHTML()))
 }

@@ -26,6 +26,12 @@ type IEC61850BrowseNode struct {
 	Children  []IEC61850BrowseNode `json:"children,omitempty"`
 }
 
+type IEC61850ProbeResult struct {
+	ObjectRef string `json:"objectRef"`
+	FC        string `json:"fc"`
+	Exists    bool   `json:"exists"`
+}
+
 func (IEC61850) ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
 	objectRef := strings.TrimSpace(point.ObjectRef)
 	if objectRef == "" {

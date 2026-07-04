@@ -68,6 +68,7 @@ func (m *Manager) collect(ctx context.Context, force bool) map[string]map[string
 	if !force {
 		points = m.duePoints(allPoints, now)
 	}
+	points = orderPointsForCollection(points)
 	timeoutInterval := maxPointCollectInterval(points, interval)
 	collectCtx, cancel := context.WithTimeout(ctx, collectTimeout(timeoutInterval))
 	defer cancel()
@@ -124,6 +125,31 @@ func (m *Manager) markCollected(point config.PointConfig, now time.Time) {
 
 func pointKey(point config.PointConfig) string {
 	return point.DeviceKey + "::" + point.Metric
+}
+
+func orderPointsForCollection(points []config.PointConfig) []config.PointConfig {
+	ordered := append([]config.PointConfig(nil), points...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return collectProtocolPriority(ordered[i].Protocol) < collectProtocolPriority(ordered[j].Protocol)
+	})
+	return ordered
+}
+
+func collectProtocolPriority(protocol string) int {
+	switch protocol {
+	case "modbus-tcp", "modbus-rtu":
+		return 0
+	case "siemens-s7":
+		return 1
+	case "iec104":
+		return 2
+	case "opcua":
+		return 3
+	case "iec61850":
+		return 4
+	default:
+		return 5
+	}
 }
 
 func retryDelay(interval time.Duration) time.Duration {

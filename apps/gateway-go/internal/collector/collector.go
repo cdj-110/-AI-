@@ -12,6 +12,10 @@ type Collector interface {
 	ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error)
 }
 
+type PointWriter interface {
+	WritePoint(ctx context.Context, point config.PointConfig, value interface{}) error
+}
+
 type RegisterRangeReader interface {
 	ReadRegisterRange(ctx context.Context, point config.PointConfig, start uint16, quantity uint16) ([]byte, error)
 }
@@ -26,11 +30,12 @@ func New(protocol string) (Collector, error) {
 		return SiemensS7{}, nil
 	case "iec104":
 		return IEC104{}, nil
-	case "iec61850":
-		return IEC61850{}, nil
 	case "opcua":
 		return OPCUA{}, nil
 	default:
+		if collector, ok := newOptionalCollector(protocol); ok {
+			return collector, nil
+		}
 		return nil, fmt.Errorf("unsupported protocol %s", protocol)
 	}
 }

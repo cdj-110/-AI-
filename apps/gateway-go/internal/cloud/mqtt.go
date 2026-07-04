@@ -16,9 +16,12 @@ type Client struct {
 	manual          bool
 	gatewayKey      string
 	hardwareID      string
+	clientID        string
+	username        string
 	topicTemplate   string
 	payloadMode     string
 	payloadTemplate string
+	subscribeTopic  string
 	mqtt            mqtt.Client
 }
 
@@ -44,6 +47,7 @@ type MQTTOptions struct {
 	TopicTemplate   string
 	PayloadMode     string
 	PayloadTemplate string
+	SubscribeTopic  string
 	Manual          bool
 }
 
@@ -62,6 +66,7 @@ func NewManualMQTTChannel(name string, gatewayKey string, channel config.MQTTCon
 		TopicTemplate:   channel.TopicTemplate,
 		PayloadMode:     channel.PayloadMode,
 		PayloadTemplate: channel.PayloadTemplate,
+		SubscribeTopic:  channel.SubscribeTopic,
 		Manual:          true,
 	}, onConnectionChanged)
 }
@@ -103,11 +108,38 @@ func NewMQTT(opts MQTTOptions, onConnectionChanged func(bool)) *Client {
 		manual:          opts.Manual,
 		gatewayKey:      opts.GatewayKey,
 		hardwareID:      opts.HardwareID,
+		clientID:        opts.ClientID,
+		username:        opts.Username,
 		topicTemplate:   defaultString(opts.TopicTemplate, "attributes"),
 		payloadMode:     defaultString(opts.PayloadMode, "flat"),
 		payloadTemplate: opts.PayloadTemplate,
+		subscribeTopic:  opts.SubscribeTopic,
 		mqtt:            mqtt.NewClient(clientOptions),
 	}
+}
+
+func (c *Client) SubscribeAttributes(handler func(topic string, payload []byte)) error {
+	if strings.TrimSpace(c.subscribeTopic) == "" {
+		return nil
+	}
+	if !c.mqtt.IsConnected() {
+		return fmt.Errorf("mqtt is not connected")
+	}
+	topic := c.RenderSubscribeTopic()
+	token := c.mqtt.Subscribe(topic, 1, func(_ mqtt.Client, message mqtt.Message) {
+		handler(message.Topic(), append([]byte(nil), message.Payload()...))
+	})
+	if !token.WaitTimeout(5 * time.Second) {
+		return fmt.Errorf("subscribe attributes timeout")
+	}
+	return token.Error()
+}
+
+func (c *Client) RenderSubscribeTopic() string {
+	topic := strings.TrimSpace(c.subscribeTopic)
+	topic = strings.ReplaceAll(topic, "{gatewayKey}", c.gatewayKey)
+	topic = strings.ReplaceAll(topic, "{clientId}", c.clientID)
+	return topic
 }
 
 func (c *Client) SubscribeRemoteConfig(handler func(RemoteConfigCommand) RemoteConfigResult, snapshot func() interface{}) error {
@@ -254,6 +286,8 @@ func (c *Client) RenderManualTopic() string {
 		topic = "attributes"
 	}
 	topic = strings.ReplaceAll(topic, "{gatewayKey}", c.gatewayKey)
+	topic = strings.ReplaceAll(topic, "{clientId}", c.clientID)
+	topic = strings.ReplaceAll(topic, "{username}", c.username)
 	topic = strings.ReplaceAll(topic, "{ts}", time.Now().Format(time.RFC3339Nano))
 	return topic
 }
@@ -276,7 +310,10 @@ func (c *Client) RenderManualPayload(metrics map[string]interface{}, grouped map
 	}
 	rendered := renderPayloadTemplate(template, map[string]interface{}{
 		"gatewayKey": c.gatewayKey,
+		"clientId":   c.clientID,
+		"username":   c.username,
 		"ts":         time.Now().Format(time.RFC3339Nano),
+		"eventTime":  time.Now().UTC().Format("20060102T150405Z"),
 		"attributes": attributes,
 		"metrics":    attributes,
 		"devices":    grouped,
@@ -328,13 +365,13 @@ func renderPayloadTemplate(template string, values map[string]interface{}) strin
 	rendered := template
 	for key, value := range values {
 		token := "{" + key + "}"
-		raw, _ := json.Marshal(value)
-		rendered = strings.ReplaceAll(rendered, token, string(raw))
 		stringToken := "\"" + token + "\""
 		if text, ok := value.(string); ok {
 			quoted, _ := json.Marshal(text)
 			rendered = strings.ReplaceAll(rendered, stringToken, string(quoted))
 		}
+		raw, _ := json.Marshal(value)
+		rendered = strings.ReplaceAll(rendered, token, string(raw))
 	}
 	return rendered
 }

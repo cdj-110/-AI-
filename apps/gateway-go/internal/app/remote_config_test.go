@@ -58,3 +58,26 @@ func TestMergeRemoteConfigPreservesMaskedPasswords(t *testing.T) {
 		t.Fatalf("masked passwords were not preserved: device=%q point=%q", merged.Devices[0].Password, merged.Devices[0].Points[0].Password)
 	}
 }
+
+func TestMQTTGroupedValuesConvertsModbusCoilsToNumbers(t *testing.T) {
+	cfg := config.Config{Points: []config.PointConfig{
+		{DeviceKey: "device-1", Metric: "coil", Protocol: "modbus-tcp", Function: 1},
+		{DeviceKey: "device-1", Metric: "holding_bool", Protocol: "modbus-tcp", Function: 3},
+		{DeviceKey: "device-2", Metric: "opc_bool", Protocol: "opcua"},
+	}}
+	grouped := map[string]map[string]interface{}{
+		"device-1": {"coil": true, "holding_bool": true},
+		"device-2": {"opc_bool": false},
+	}
+
+	converted := mqttGroupedValues(cfg, grouped)
+	if converted["device-1"]["coil"] != 1 {
+		t.Fatalf("coil = %#v, want 1", converted["device-1"]["coil"])
+	}
+	if converted["device-1"]["holding_bool"] != true {
+		t.Fatalf("holding bool should remain bool: %#v", converted["device-1"]["holding_bool"])
+	}
+	if converted["device-2"]["opc_bool"] != false {
+		t.Fatalf("opc bool should remain bool: %#v", converted["device-2"]["opc_bool"])
+	}
+}

@@ -28,6 +28,35 @@ func TestMQTTChannelsRemainIndependent(t *testing.T) {
 	}
 }
 
+func TestResetMQTTChannelsPreservesUnchangedConnections(t *testing.T) {
+	enabled := true
+	disabled := false
+	cfg := config.Config{
+		GatewayKey: "gateway",
+		MQTTChannels: []config.MQTTConfig{
+			{Name: "first", Enabled: &enabled, Broker: "tcp://one:1883", ClientID: "one", Username: "one"},
+			{Name: "second", Enabled: &enabled, Broker: "tcp://two:1883", ClientID: "two", Username: "two"},
+		},
+	}
+	store := New(cfg)
+	store.SetMQTTChannelConnected("manual-1", true)
+	store.SetMQTTChannelConnected("manual-2", true)
+
+	cfg.MQTTChannels[0].Enabled = &disabled
+	store.ResetMQTTChannels(cfg)
+
+	snapshot := store.Snapshot()
+	if snapshot.MQTTChannels["manual-1"].Connected {
+		t.Fatal("disabled channel should not remain connected")
+	}
+	if !snapshot.MQTTChannels["manual-2"].Connected {
+		t.Fatal("unchanged enabled channel should keep connected state")
+	}
+	if !snapshot.MQTTConnected {
+		t.Fatal("overall MQTT state should remain connected while manual-2 is connected")
+	}
+}
+
 func TestPointPresentationMetadataAppearsInSnapshot(t *testing.T) {
 	cfg := config.Config{
 		GatewayKey: "gateway",

@@ -2,8 +2,11 @@ package web
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -11,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"weikong-iot-platform/apps/gateway-go/internal/config"
 )
 
 const (
@@ -20,9 +25,24 @@ const (
 
 type authManager struct {
 	mu       sync.Mutex
-	sessions map[string]time.Time
+	sessions map[string]sessionInfo
 	username string
 	password string
+}
+
+type sessionInfo struct {
+	ExpiresAt   time.Time
+	Username    string
+	DisplayName string
+	RoleKey     string
+	Permissions []string
+}
+
+type currentUserInfo struct {
+	Username    string   `json:"username"`
+	DisplayName string   `json:"displayName,omitempty"`
+	RoleKey     string   `json:"roleKey"`
+	Permissions []string `json:"permissions"`
 }
 
 func newAuthManager() *authManager {
@@ -34,7 +54,7 @@ func newAuthManager() *authManager {
 	if password == "" {
 		password = "123456"
 	}
-	return &authManager{sessions: make(map[string]time.Time), username: username, password: password}
+	return &authManager{sessions: make(map[string]sessionInfo), username: username, password: password}
 }
 
 func (s *Server) authState() *authManager {
@@ -59,19 +79,42 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 }
 
 func (s *Server) authenticated(request *http.Request) bool {
+	_, ok := s.currentUser(request)
+	return ok
+}
+
+func (s *Server) currentUser(request *http.Request) (currentUserInfo, bool) {
 	cookie, err := request.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
-		return false
+		return currentUserInfo{}, false
 	}
 	auth := s.authState()
 	auth.mu.Lock()
 	defer auth.mu.Unlock()
-	expiresAt, ok := auth.sessions[cookie.Value]
-	if !ok || time.Now().After(expiresAt) {
+	session, ok := auth.sessions[cookie.Value]
+	if !ok || time.Now().After(session.ExpiresAt) {
 		delete(auth.sessions, cookie.Value)
+		return currentUserInfo{}, false
+	}
+	return currentUserInfo{
+		Username:    session.Username,
+		DisplayName: session.DisplayName,
+		RoleKey:     session.RoleKey,
+		Permissions: session.Permissions,
+	}, true
+}
+
+func (s *Server) hasPermission(request *http.Request, permission string) bool {
+	user, ok := s.currentUser(request)
+	if !ok {
 		return false
 	}
-	return true
+	for _, item := range user.Permissions {
+		if item == "*" || item == permission {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
@@ -92,7 +135,6 @@ func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
 		s.renderLogin(writer, "/", "请求格式错误", http.StatusBadRequest)
 		return
 	}
-	auth := s.authState()
 	username := request.FormValue("gateway_user")
 	if username == "" {
 		username = request.FormValue("username")
@@ -101,9 +143,8 @@ func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
 	if password == "" {
 		password = request.FormValue("password")
 	}
-	usernameOK := subtle.ConstantTimeCompare([]byte(username), []byte(auth.username)) == 1
-	passwordOK := subtle.ConstantTimeCompare([]byte(password), []byte(auth.password)) == 1
-	if !usernameOK || !passwordOK {
+	loginUser, ok := s.verifyCredentials(username, password)
+	if !ok {
 		s.renderLogin(writer, request.FormValue("next"), "账号或密码错误", http.StatusUnauthorized)
 		return
 	}
@@ -113,14 +154,97 @@ func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	auth := s.authState()
 	auth.mu.Lock()
-	auth.sessions[token] = time.Now().Add(sessionLifetime)
+	auth.sessions[token] = sessionInfo{
+		ExpiresAt:   time.Now().Add(sessionLifetime),
+		Username:    loginUser.Username,
+		DisplayName: loginUser.DisplayName,
+		RoleKey:     loginUser.RoleKey,
+		Permissions: uniqueStrings(loginUser.Permissions),
+	}
 	auth.mu.Unlock()
 	http.SetCookie(writer, &http.Cookie{
 		Name: sessionCookieName, Value: token, Path: "/", MaxAge: int(sessionLifetime.Seconds()),
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: request.TLS != nil,
 	})
 	http.Redirect(writer, request, safeNext(request.FormValue("next")), http.StatusSeeOther)
+}
+
+func (s *Server) verifyCredentials(username string, password string) (currentUserInfo, bool) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return currentUserInfo{}, false
+	}
+	security, err := s.loadSecurity()
+	if err == nil && len(security.Users) > 0 {
+		rolePermissions := map[string][]string{}
+		for _, role := range defaultedRoles(security.Roles) {
+			rolePermissions[role.RoleKey] = uniqueStrings(role.Permissions)
+		}
+		for _, user := range security.Users {
+			if !user.Enabled || user.Username != username {
+				continue
+			}
+			if !verifyPasswordHash(user.PasswordHash, password) {
+				return currentUserInfo{}, false
+			}
+			roleKey := valueOrDefault(user.RoleKey, "viewer")
+			return currentUserInfo{
+				Username:    user.Username,
+				DisplayName: user.DisplayName,
+				RoleKey:     roleKey,
+				Permissions: rolePermissions[roleKey],
+			}, true
+		}
+		return currentUserInfo{}, false
+	}
+
+	auth := s.authState()
+	usernameOK := subtle.ConstantTimeCompare([]byte(username), []byte(auth.username)) == 1
+	passwordOK := subtle.ConstantTimeCompare([]byte(password), []byte(auth.password)) == 1
+	if usernameOK && passwordOK {
+		return currentUserInfo{Username: auth.username, RoleKey: "admin", Permissions: []string{"*"}}, true
+	}
+	return currentUserInfo{}, false
+}
+
+func (s *Server) loadSecurity() (config.SecurityConfig, error) {
+	if s.configPath == "" {
+		return config.SecurityConfig{}, os.ErrNotExist
+	}
+	raw, err := os.ReadFile(s.configPath)
+	if err != nil {
+		return config.SecurityConfig{}, err
+	}
+	var cfg struct {
+		Security config.SecurityConfig `json:"security"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return config.SecurityConfig{}, err
+	}
+	return cfg.Security, nil
+}
+
+func hashPassword(password string) (string, error) {
+	saltBytes := make([]byte, 16)
+	if _, err := rand.Read(saltBytes); err != nil {
+		return "", err
+	}
+	salt := hex.EncodeToString(saltBytes)
+	sum := sha256.Sum256([]byte(salt + ":" + password))
+	return "sha256:" + salt + ":" + hex.EncodeToString(sum[:]), nil
+}
+
+func verifyPasswordHash(hash string, password string) bool {
+	parts := strings.Split(hash, ":")
+	if len(parts) != 3 || parts[0] != "sha256" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(parts[1] + ":" + password))
+	expected := parts[2]
+	actual := hex.EncodeToString(sum[:])
+	return subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
 }
 
 func (s *Server) logout(writer http.ResponseWriter, request *http.Request) {

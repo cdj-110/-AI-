@@ -6,6 +6,7 @@ package collector
 #cgo LDFLAGS: -liec61850
 #include <stdlib.h>
 #include "iec61850_client.h"
+#include "mms_client_connection.h"
 
 static void* wkLinkedListData(LinkedList item) {
 	return item->data;
@@ -48,7 +49,14 @@ func BrowseIEC61850Nodes(ctx context.Context, address string, parentRef string, 
 	}
 	defer C.IedConnection_close(conn)
 
-	if strings.TrimSpace(parentRef) != "" {
+	parentRef = strings.TrimSpace(parentRef)
+	if parentRef != "" {
+		if !strings.Contains(parentRef, "/") {
+			return browseIEC61850LogicalDevice(conn, parentRef)
+		}
+		if slash := strings.Index(parentRef, "/"); slash >= 0 && !strings.Contains(parentRef[slash+1:], ".") {
+			return browseIEC61850LogicalNode(conn, parentRef)
+		}
 		return browseIEC61850DataDirectory(conn, parentRef, recursive)
 	}
 	return browseIEC61850Server(conn, recursive)
@@ -81,7 +89,47 @@ func browseIEC61850Server(conn C.IedConnection, recursive bool) ([]IEC61850Brows
 		node.Leaf = len(childNodes) == 0
 		nodes = append(nodes, node)
 	}
+	nodes = mergeIEC61850VMDVariables(conn, nodes)
 	return nodes, nil
+}
+
+func mergeIEC61850VMDVariables(conn C.IedConnection, nodes []IEC61850BrowseNode) []IEC61850BrowseNode {
+	mmsConn := C.IedConnection_getMmsConnection(conn)
+	if mmsConn == nil {
+		return nodes
+	}
+	var mmsErr C.MmsError
+	variables := C.MmsConnection_getVMDVariableNames(mmsConn, &mmsErr)
+	if mmsErr != C.MMS_ERROR_NONE || variables == nil {
+		return nodes
+	}
+	defer C.LinkedList_destroy(variables)
+	for item := C.LinkedList_getNext(variables); item != nil; item = C.LinkedList_getNext(item) {
+		variable := cStringListItem(item)
+		node, ok := iec61850VMDVariableNameNode(variable)
+		if !ok {
+			continue
+		}
+		nodes = insertIEC61850BrowseNode(nodes, node.ObjectRef, node.FC, node.DataType)
+	}
+	return nodes
+}
+
+func iec61850VMDVariableNameNode(variable string) (IEC61850BrowseNode, bool) {
+	variable = strings.TrimSpace(variable)
+	if variable == "" {
+		return IEC61850BrowseNode{}, false
+	}
+	slash := strings.Index(variable, "/")
+	if slash < 1 {
+		return IEC61850BrowseNode{}, false
+	}
+	ld := variable[:slash]
+	node, ok := iec61850VariableNameNode(ld, variable[slash+1:])
+	if !ok {
+		return IEC61850BrowseNode{}, false
+	}
+	return node, true
 }
 
 func browseIEC61850LogicalDevice(conn C.IedConnection, ld string) ([]IEC61850BrowseNode, error) {
@@ -90,6 +138,10 @@ func browseIEC61850LogicalDevice(conn C.IedConnection, ld string) ([]IEC61850Bro
 	var err C.IedClientError
 	lns := C.IedConnection_getLogicalDeviceDirectory(conn, &err, cLD)
 	if err != C.IED_ERROR_OK {
+		nodes, variableErr := browseIEC61850LogicalDeviceVariables(conn, ld)
+		if variableErr == nil && len(nodes) > 0 {
+			return nodes, nil
+		}
 		return nil, fmt.Errorf("IEC61850 get logical device %s failed: error %d", ld, int(err))
 	}
 	defer C.LinkedList_destroy(lns)
@@ -111,6 +163,187 @@ func browseIEC61850LogicalDevice(conn C.IedConnection, ld string) ([]IEC61850Bro
 		nodes = append(nodes, node)
 	}
 	return nodes, nil
+}
+
+func browseIEC61850LogicalDeviceVariables(conn C.IedConnection, ld string) ([]IEC61850BrowseNode, error) {
+	cLD := C.CString(ld)
+	defer C.free(unsafe.Pointer(cLD))
+	var err C.IedClientError
+	variables := C.IedConnection_getLogicalDeviceVariables(conn, &err, cLD)
+	if err != C.IED_ERROR_OK {
+		return nil, fmt.Errorf("IEC61850 get logical device variables %s failed: error %d", ld, int(err))
+	}
+	defer C.LinkedList_destroy(variables)
+
+	nodes := []IEC61850BrowseNode{}
+	for item := C.LinkedList_getNext(variables); item != nil; item = C.LinkedList_getNext(item) {
+		variable := cStringListItem(item)
+		node, ok := iec61850VariableNameNode(ld, variable)
+		if !ok {
+			continue
+		}
+		nodes = insertIEC61850BrowseNode(nodes, node.ObjectRef, node.FC, node.DataType)
+	}
+	return nodes, nil
+}
+
+func iec61850VariableNameNode(ld string, variable string) (IEC61850BrowseNode, bool) {
+	variable = strings.TrimSpace(variable)
+	if variable == "" {
+		return IEC61850BrowseNode{}, false
+	}
+	parts := strings.Split(variable, "$")
+	if len(parts) < 3 {
+		return IEC61850BrowseNode{}, false
+	}
+	ln := strings.TrimSpace(parts[0])
+	fc := strings.TrimSpace(parts[1])
+	if ln == "" || fc == "" {
+		return IEC61850BrowseNode{}, false
+	}
+	ref := ld + "/" + ln + "." + strings.Join(parts[2:], ".")
+	return IEC61850BrowseNode{
+		Name:      parts[len(parts)-1],
+		ObjectRef: ref,
+		FC:        fc,
+		DataType:  inferIEC61850DataType(ref),
+		Leaf:      true,
+	}, true
+}
+
+func insertIEC61850BrowseNode(nodes []IEC61850BrowseNode, objectRef string, fc string, dataType string) []IEC61850BrowseNode {
+	parts := splitIEC61850ObjectRef(objectRef)
+	if len(parts) == 0 {
+		return nodes
+	}
+	insertIEC61850BrowseNodeAt(&nodes, parts, objectRef, fc, dataType, 0)
+	return nodes
+}
+
+func MergeIEC61850BrowseNodes(nodes []IEC61850BrowseNode, extra []IEC61850BrowseNode) []IEC61850BrowseNode {
+	for _, node := range extra {
+		nodes = mergeIEC61850BrowseNode(nodes, node)
+	}
+	return nodes
+}
+
+func mergeIEC61850BrowseNode(nodes []IEC61850BrowseNode, node IEC61850BrowseNode) []IEC61850BrowseNode {
+	index := -1
+	for i := range nodes {
+		if nodes[i].ObjectRef == node.ObjectRef || nodes[i].Name == node.Name {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return append(nodes, node)
+	}
+	if node.FC != "" {
+		nodes[index].FC = node.FC
+	}
+	if node.DataType != "" {
+		nodes[index].DataType = node.DataType
+	}
+	nodes[index].Leaf = node.Leaf && len(node.Children) == 0
+	nodes[index].Children = MergeIEC61850BrowseNodes(nodes[index].Children, node.Children)
+	if len(nodes[index].Children) > 0 {
+		nodes[index].Leaf = false
+	}
+	return nodes
+}
+
+func DiscoverIEC61850TemplateNodes(ctx context.Context, address string, iedName string) ([]IEC61850BrowseNode, error) {
+	iedName = strings.Trim(strings.TrimSpace(iedName), "/.")
+	if iedName == "" {
+		return nil, nil
+	}
+	candidates := iec61850TemplateProbeCandidates(iedName)
+	probed, err := ProbeIEC61850ObjectRefs(ctx, address, candidates)
+	if err != nil {
+		return nil, err
+	}
+	nodes := []IEC61850BrowseNode{}
+	for _, result := range probed {
+		if !result.Exists {
+			continue
+		}
+		nodes = insertIEC61850BrowseNode(nodes, result.ObjectRef, result.FC, inferIEC61850DataType(result.ObjectRef))
+	}
+	return nodes, nil
+}
+
+func iec61850TemplateProbeCandidates(iedName string) []IEC61850ProbeResult {
+	const maxYCIndex = 256
+	const maxMMXUIndex = 128
+	results := make([]IEC61850ProbeResult, 0, maxYCIndex+maxMMXUIndex)
+	for index := 1; index <= maxYCIndex; index++ {
+		results = append(results, IEC61850ProbeResult{
+			ObjectRef: fmt.Sprintf("%s/MMXU1.YC%d.mag.f", iedName, index),
+			FC:        "MX",
+		})
+	}
+	for index := 1; index <= maxMMXUIndex; index++ {
+		results = append(results, IEC61850ProbeResult{
+			ObjectRef: fmt.Sprintf("%s/MMXU%d.Charges.mag.f", iedName, index),
+			FC:        "MX",
+		})
+	}
+	return results
+}
+
+func insertIEC61850BrowseNodeAt(nodes *[]IEC61850BrowseNode, parts []string, objectRef string, fc string, dataType string, depth int) {
+	if depth >= len(parts) {
+		return
+	}
+	ref := joinIEC61850ObjectRef(parts[:depth+1])
+	index := -1
+	for i := range *nodes {
+		if (*nodes)[i].ObjectRef == ref || (*nodes)[i].Name == parts[depth] {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		*nodes = append(*nodes, IEC61850BrowseNode{Name: parts[depth], ObjectRef: ref, Leaf: depth == len(parts)-1})
+		index = len(*nodes) - 1
+	}
+	if depth == len(parts)-1 {
+		(*nodes)[index].ObjectRef = objectRef
+		(*nodes)[index].FC = fc
+		(*nodes)[index].DataType = dataType
+		(*nodes)[index].Leaf = true
+		return
+	}
+	(*nodes)[index].Leaf = false
+	insertIEC61850BrowseNodeAt(&(*nodes)[index].Children, parts, objectRef, fc, dataType, depth+1)
+}
+
+func splitIEC61850ObjectRef(objectRef string) []string {
+	objectRef = strings.TrimSpace(objectRef)
+	if objectRef == "" {
+		return nil
+	}
+	slash := strings.Index(objectRef, "/")
+	if slash < 0 {
+		return []string{objectRef}
+	}
+	parts := []string{objectRef[:slash]}
+	for _, part := range strings.Split(objectRef[slash+1:], ".") {
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return parts
+}
+
+func joinIEC61850ObjectRef(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return parts[0] + "/" + strings.Join(parts[1:], ".")
 }
 
 func browseIEC61850LogicalNode(conn C.IedConnection, lnRef string) ([]IEC61850BrowseNode, error) {
@@ -212,9 +445,63 @@ func readIEC61850Point(ctx context.Context, point config.PointConfig, objectRef 
 		return nil, fmt.Errorf("IEC61850 read %s[%s] returned empty value", objectRef, fc)
 	}
 	defer C.MmsValue_delete(value)
+	if C.MmsValue_getType(value) == C.MMS_DATA_ACCESS_ERROR {
+		return nil, fmt.Errorf("IEC61850 read %s[%s] data access error %d", objectRef, fc, int(C.MmsValue_getDataAccessError(value)))
+	}
 
 	converted := iec61850MmsValue(value)
 	return applyIEC61850Scale(point, converted), nil
+}
+
+func ProbeIEC61850ObjectRefs(ctx context.Context, address string, refs []IEC61850ProbeResult) ([]IEC61850ProbeResult, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	address = iec61850Address(address)
+	host, port := splitIEC61850HostPort(address)
+	cHost := C.CString(host)
+	defer C.free(unsafe.Pointer(cHost))
+
+	conn := C.IedConnection_create()
+	defer C.IedConnection_destroy(conn)
+	C.IedConnection_setConnectTimeout(conn, 3000)
+	C.IedConnection_setRequestTimeout(conn, 3000)
+
+	var err C.IedClientError
+	C.IedConnection_connect(conn, &err, cHost, C.int(port))
+	if err != C.IED_ERROR_OK {
+		return nil, fmt.Errorf("IEC61850 MMS connect failed %s: error %d", address, int(err))
+	}
+	defer C.IedConnection_close(conn)
+
+	results := make([]IEC61850ProbeResult, 0, len(refs))
+	for _, ref := range refs {
+		select {
+		case <-ctx.Done():
+			return results, ctx.Err()
+		default:
+		}
+		ref.ObjectRef = strings.TrimSpace(ref.ObjectRef)
+		if ref.ObjectRef == "" {
+			continue
+		}
+		fc := strings.TrimSpace(ref.FC)
+		if fc == "" {
+			fc = inferIEC61850FC(ref.ObjectRef, "")
+		}
+		cRef := C.CString(ref.ObjectRef)
+		spec := C.IedConnection_getVariableSpecification(conn, &err, cRef, iec61850FunctionalConstraint(fc))
+		ref.FC = fc
+		ref.Exists = err == C.IED_ERROR_OK && spec != nil
+		if spec != nil {
+			C.MmsVariableSpecification_destroy(spec)
+		}
+		C.free(unsafe.Pointer(cRef))
+		results = append(results, ref)
+	}
+	return results, nil
 }
 
 func iec61850FunctionalConstraint(fc string) C.FunctionalConstraint {

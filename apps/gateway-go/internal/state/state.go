@@ -67,6 +67,7 @@ type Snapshot struct {
 	ErrorCount     int                          `json:"errorCount"`
 	Points         []PointStatus                `json:"points"`
 	Errors         []Event                      `json:"errors"`
+	SystemMetrics  hardware.SystemMetrics       `json:"systemMetrics"`
 }
 
 func New(cfg config.Config) *Store {
@@ -106,15 +107,32 @@ func (s *Store) SetMQTTConnected(connected bool) {
 func (s *Store) ResetMQTTChannels(cfg config.Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.mqttChannels = mqttChannelsForConfig(cfg)
+	previous := s.mqttChannels
+	next := mqttChannelsForConfig(cfg)
+	for key, channel := range next {
+		if channel.Enabled {
+			channel.Connected = previous[key].Connected
+			next[key] = channel
+		}
+	}
+	s.mqttChannels = next
 	s.mqttEnabled = cfg.ManualMQTTEnabled() || cfg.Activation.IsEnabled()
 	s.mqttConnected = false
+	for _, current := range s.mqttChannels {
+		if current.Enabled && current.Connected {
+			s.mqttConnected = true
+			break
+		}
+	}
 }
 
 func (s *Store) SetMQTTChannelConnected(name string, connected bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	channel := s.mqttChannels[name]
+	channel, ok := s.mqttChannels[name]
+	if !ok {
+		return
+	}
 	channel.Connected = connected
 	s.mqttChannels[name] = channel
 	s.mqttConnected = false
@@ -214,7 +232,6 @@ func (s *Store) AddError(message string) {
 
 func (s *Store) Snapshot() Snapshot {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	points := make([]PointStatus, 0, len(s.points))
 	healthy := 0
 	errorCount := 0
@@ -254,6 +271,8 @@ func (s *Store) Snapshot() Snapshot {
 		lastPublishAt := s.lastPublishAt
 		snapshot.LastPublishAt = &lastPublishAt
 	}
+	s.mu.RUnlock()
+	snapshot.SystemMetrics = hardware.ReadSystemMetrics()
 	return snapshot
 }
 

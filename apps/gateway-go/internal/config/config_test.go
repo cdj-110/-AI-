@@ -242,6 +242,48 @@ func TestResourceChannelDeviceExpandsToRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestDuplicateChannelKeysAreMadeUniqueAndDevicesAreRemapped(t *testing.T) {
+	raw := []byte(`{
+  "gatewayKey": "gw-duplicate-channel",
+  "activation": {"enabled": false},
+  "mqtt": {"enabled": false},
+  "resources": [{
+    "resourceKey": "eth0",
+    "name": "eth0",
+    "type": "network",
+    "enabled": true,
+    "network": {"interface": "eth0", "mode": "static", "ipAddress": "192.168.1.10", "prefixLength": 24, "enabled": true}
+  }],
+  "channels": [
+    {"channelKey": "eth0-channel-05", "resourceKey": "eth0", "name": "OPC UA", "protocol": "opcua", "enabled": true},
+    {"channelKey": "eth0-channel-05", "resourceKey": "eth0", "name": "IEC104", "protocol": "iec104", "enabled": true}
+  ],
+  "devices": [{
+    "deviceKey": "iec104-device",
+    "channelKey": "eth0-channel-05",
+    "protocol": "iec104",
+    "address": "192.168.1.141:2404",
+    "points": [{"metric": "DY1", "register": 1, "dataType": "float32"}]
+  }]
+}`)
+	cfg, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Channels) != 2 {
+		t.Fatalf("len(Channels) = %d, want 2", len(cfg.Channels))
+	}
+	if cfg.Channels[0].ChannelKey == cfg.Channels[1].ChannelKey {
+		t.Fatalf("channel keys were not made unique: %#v", cfg.Channels)
+	}
+	if cfg.Devices[0].ChannelKey != cfg.Channels[1].ChannelKey {
+		t.Fatalf("device channelKey = %q, want renamed IEC104 key %q", cfg.Devices[0].ChannelKey, cfg.Channels[1].ChannelKey)
+	}
+	if cfg.Points[0].ChannelKey != cfg.Channels[1].ChannelKey {
+		t.Fatalf("point channelKey = %q, want renamed IEC104 key %q", cfg.Points[0].ChannelKey, cfg.Channels[1].ChannelKey)
+	}
+}
+
 func TestLegacyFlatRTUPointKeepsAddress(t *testing.T) {
 	raw := []byte(`{
   "gatewayKey": "gw-legacy-rtu",

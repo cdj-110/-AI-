@@ -170,9 +170,7 @@ func scanS7PointRange(ctx context.Context, body s7ScanRequest) ([]s7PointPreview
 		}
 		point.ApplyDefaults()
 		value, err := gatewayruntime.ReadPoint(scanCtx, point)
-		if err == nil && isZeroNumericS7ScanValue(point, value.Value) {
-			filteredZeroCount++
-		} else if err == nil {
+		if err == nil {
 			points = append(points, s7PointPreviewItem{PointConfig: point, Selected: true, Value: value.Value})
 		} else if len(warnings) < 3 {
 			warnings = append(warnings, fmt.Sprintf("%s 读取失败：%v", point.Name, err))
@@ -253,10 +251,6 @@ func scanS7SmartAutoPoints(ctx context.Context, body s7ScanRequest) ([]s7PointPr
 				if len(warnings) < 3 {
 					warnings = append(warnings, fmt.Sprintf("%s 读取失败：%v", point.Name, err))
 				}
-				continue
-			}
-			if isZeroNumericS7ScanValue(point, value.Value) {
-				filteredZeroCount++
 				continue
 			}
 			points = append(points, s7PointPreviewItem{PointConfig: point, Selected: true, Value: value.Value})

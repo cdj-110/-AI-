@@ -66,6 +66,20 @@ func (ModbusTCP) ReadRegisterRange(ctx context.Context, point config.PointConfig
 	return raw, nil
 }
 
+func (ModbusTCP) WritePoint(ctx context.Context, point config.PointConfig, value interface{}) error {
+	conn, err := getTCPConnection(point)
+	if err != nil {
+		return err
+	}
+	conn.mu.Lock()
+	err = writeByFunction(ctx, conn.client, point, value)
+	conn.mu.Unlock()
+	if err != nil {
+		closeTCPConnection(point)
+	}
+	return err
+}
+
 func getTCPConnection(point config.PointConfig) (*tcpConnection, error) {
 	key := tcpConnectionKey(point)
 	tcpPool.Lock()
@@ -131,6 +145,35 @@ func readByFunction(ctx context.Context, client modbus.Client, point config.Poin
 		return readWithHint(point, raw, err)
 	default:
 		return nil, fmt.Errorf("unsupported modbus function %d", point.Function)
+	}
+}
+
+func writeByFunction(ctx context.Context, client modbus.Client, point config.PointConfig, value interface{}) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	raw, err := mapper.Encode(point, value)
+	if err != nil {
+		return err
+	}
+	switch point.Function {
+	case 1:
+		if len(raw) < 2 {
+			return fmt.Errorf("coil write requires 2 bytes")
+		}
+		_, err = client.WriteSingleCoil(point.Register, uint16(raw[0])<<8|uint16(raw[1]))
+		return err
+	case 3:
+		if len(raw) == 2 {
+			_, err = client.WriteSingleRegister(point.Register, uint16(raw[0])<<8|uint16(raw[1]))
+			return err
+		}
+		_, err = client.WriteMultipleRegisters(point.Register, uint16(len(raw)/2), raw)
+		return err
+	default:
+		return fmt.Errorf("point %s function %d is read-only or unsupported for write", point.Metric, point.Function)
 	}
 }
 
