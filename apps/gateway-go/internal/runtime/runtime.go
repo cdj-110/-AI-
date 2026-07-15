@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -14,25 +15,38 @@ import (
 	"weikong-iot-platform/apps/gateway-go/internal/state"
 )
 
+var ErrWritablePointNotFound = errors.New("writable point not found")
+
 type Manager struct {
 	mu            sync.RWMutex
 	cfg           config.Config
 	state         *state.Store
 	retryAfter    map[string]time.Time
 	lastCollected map[string]time.Time
+	lastWritten   map[string]time.Time
+}
+
+type CollectionLane struct {
+	Key       string
+	DeviceKey string
+	Channel   string
+	Points    []config.PointConfig
+	Interval  time.Duration
 }
 
 func NewManager(cfg config.Config, store *state.Store) *Manager {
-	return &Manager{cfg: cfg, state: store, retryAfter: map[string]time.Time{}, lastCollected: map[string]time.Time{}}
+	return &Manager{cfg: cfg, state: store, retryAfter: map[string]time.Time{}, lastCollected: map[string]time.Time{}, lastWritten: map[string]time.Time{}}
 }
 
 func (m *Manager) UpdateConfig(cfg config.Config) {
 	collector.CloseRTUConnections()
+	collector.CloseIEC104Connections()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cfg = cfg
 	m.retryAfter = map[string]time.Time{}
 	m.lastCollected = map[string]time.Time{}
+	m.lastWritten = map[string]time.Time{}
 	m.state.ReplaceConfig(cfg)
 }
 
@@ -56,26 +70,115 @@ func (m *Manager) CollectNow(ctx context.Context) map[string]map[string]interfac
 	return m.collect(ctx, true)
 }
 
+func (m *Manager) WritePoint(ctx context.Context, deviceKey, metric string, value interface{}) (config.PointConfig, error) {
+	point, ok := findWritablePoint(m.Config(), deviceKey, metric)
+	if !ok {
+		return config.PointConfig{}, fmt.Errorf("%w for metric %s", ErrWritablePointNotFound, metric)
+	}
+	writer, err := collector.New(point.Protocol)
+	if err != nil {
+		return config.PointConfig{}, err
+	}
+	pointWriter, ok := writer.(collector.PointWriter)
+	if !ok {
+		return config.PointConfig{}, fmt.Errorf("protocol %s does not support write", point.Protocol)
+	}
+	if err := pointWriter.WritePoint(ctx, point, value); err != nil {
+		return config.PointConfig{}, err
+	}
+	m.markWritten(point)
+	m.state.SetPointValue(point.DeviceKey, point.Metric, value)
+	return point, nil
+}
+
+func findWritablePoint(cfg config.Config, deviceKey, metric string) (config.PointConfig, bool) {
+	for _, point := range cfg.Points {
+		if point.Metric != metric || (deviceKey != "" && point.DeviceKey != deviceKey) {
+			continue
+		}
+		if (point.Protocol == "modbus-tcp" || point.Protocol == "modbus-rtu") && (point.Function == 1 || point.Function == 3) {
+			return point, true
+		}
+	}
+	return config.PointConfig{}, false
+}
+
+func (m *Manager) CollectionLanes() []CollectionLane {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	fallback := m.cfg.CollectInterval()
+	lanes := map[string]*CollectionLane{}
+	var order []string
+	for _, point := range m.cfg.Points {
+		if point.DeviceKey == "" || point.Metric == "" {
+			continue
+		}
+		key := collectionLaneKey(point)
+		lane := lanes[key]
+		if lane == nil {
+			lane = &CollectionLane{
+				Key:       key,
+				DeviceKey: point.DeviceKey,
+				Channel:   collectionLaneChannel(point),
+			}
+			lanes[key] = lane
+			order = append(order, key)
+		}
+		lane.Points = append(lane.Points, point)
+		interval := pointCollectInterval(point, fallback)
+		if lane.Interval <= 0 || interval < lane.Interval {
+			lane.Interval = interval
+		}
+	}
+	result := make([]CollectionLane, 0, len(order))
+	for _, key := range order {
+		result = append(result, *lanes[key])
+	}
+	return result
+}
+
+func (m *Manager) CollectLane(ctx context.Context, laneKey string, force bool) map[string]map[string]interface{} {
+	m.mu.RLock()
+	fallback := m.cfg.CollectInterval()
+	var points []config.PointConfig
+	for _, point := range m.cfg.Points {
+		if collectionLaneKey(point) == laneKey {
+			points = append(points, point)
+		}
+	}
+	interval := collectionLaneInterval(points, fallback)
+	m.mu.RUnlock()
+	return m.collectPointSet(ctx, points, interval, force)
+}
+
 func (m *Manager) collect(ctx context.Context, force bool) map[string]map[string]interface{} {
 	m.mu.RLock()
 	allPoints := append([]config.PointConfig(nil), m.cfg.Points...)
 	interval := m.cfg.CollectInterval()
 	m.mu.RUnlock()
+	return m.collectPointSet(ctx, allPoints, interval, force)
+}
 
+func (m *Manager) collectPointSet(ctx context.Context, allPoints []config.PointConfig, interval time.Duration, force bool) map[string]map[string]interface{} {
 	m.state.MarkCollect()
 	now := time.Now()
 	points := allPoints
 	if !force {
-		points = m.duePoints(allPoints, now)
+		points = m.duePoints(allPoints, now, interval)
 	}
 	points = orderPointsForCollection(points)
-	timeoutInterval := maxPointCollectInterval(points, interval)
-	collectCtx, cancel := context.WithTimeout(ctx, collectTimeout(timeoutInterval))
+	collectCtx, cancel := context.WithTimeout(ctx, collectTimeout(interval))
 	defer cancel()
 
 	grouped := make(map[string]map[string]interface{})
 	for _, point := range collectPoints(collectCtx, points) {
+		if m.wasWrittenAfter(point.Point, now) {
+			continue
+		}
 		if point.Err != nil {
+			if errors.Is(point.Err, collector.ErrCollectionDeferred) {
+				continue
+			}
 			m.state.SetPointError(point.Point, point.Err)
 			m.markRetryLater(point.Point, now)
 			continue
@@ -90,7 +193,52 @@ func (m *Manager) collect(ctx context.Context, force bool) map[string]map[string
 	return grouped
 }
 
-func (m *Manager) duePoints(points []config.PointConfig, now time.Time) []config.PointConfig {
+func (m *Manager) markWritten(point config.PointConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	m.lastWritten[pointKey(point)] = now
+	for _, configured := range m.cfg.Points {
+		if configured.DeviceKey == point.DeviceKey {
+			delete(m.retryAfter, pointKey(configured))
+			delete(m.lastCollected, pointKey(configured))
+		}
+	}
+}
+
+func (m *Manager) wasWrittenAfter(point config.PointConfig, collectionStartedAt time.Time) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	writtenAt, ok := m.lastWritten[pointKey(point)]
+	return ok && writtenAt.After(collectionStartedAt)
+}
+
+func collectionLaneKey(point config.PointConfig) string {
+	return point.DeviceKey + "::" + collectionLaneChannel(point)
+}
+
+func collectionLaneChannel(point config.PointConfig) string {
+	if point.ChannelKey != "" {
+		return point.ChannelKey
+	}
+	return fmt.Sprintf("%s#%s#%d", point.Protocol, point.Address, point.SlaveID)
+}
+
+func collectionLaneInterval(points []config.PointConfig, fallback time.Duration) time.Duration {
+	interval := fallback
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	for _, point := range points {
+		pointInterval := pointCollectInterval(point, fallback)
+		if interval <= 0 || pointInterval < interval {
+			interval = pointInterval
+		}
+	}
+	return interval
+}
+
+func (m *Manager) duePoints(points []config.PointConfig, now time.Time, fallbackInterval time.Duration) []config.PointConfig {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var due []config.PointConfig
@@ -100,8 +248,8 @@ func (m *Manager) duePoints(points []config.PointConfig, now time.Time) []config
 		if ok && now.Before(next) {
 			continue
 		}
-		interval := pointCollectInterval(point)
-		if last, ok := m.lastCollected[key]; ok && now.Sub(last) < interval {
+		interval := pointCollectInterval(point, fallbackInterval)
+		if last, ok := m.lastCollected[key]; ok && now.Add(dueTolerance(interval)).Sub(last) < interval {
 			continue
 		}
 		due = append(due, point)
@@ -112,7 +260,7 @@ func (m *Manager) duePoints(points []config.PointConfig, now time.Time) []config
 func (m *Manager) markRetryLater(point config.PointConfig, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.retryAfter[pointKey(point)] = now.Add(retryDelay(pointCollectInterval(point)))
+	m.retryAfter[pointKey(point)] = now.Add(deviceReconnectDelay(point, m.cfg.Devices))
 }
 
 func (m *Manager) markCollected(point config.PointConfig, now time.Time) {
@@ -152,22 +300,38 @@ func collectProtocolPriority(protocol string) int {
 	}
 }
 
-func retryDelay(interval time.Duration) time.Duration {
-	if interval <= 0 {
-		interval = time.Second
+func deviceReconnectDelay(point config.PointConfig, devices []config.DeviceConfig) time.Duration {
+	seconds := 30
+	for _, device := range devices {
+		if device.DeviceKey == point.DeviceKey {
+			if device.ReconnectIntervalSeconds > 0 {
+				seconds = device.ReconnectIntervalSeconds
+			}
+			break
+		}
 	}
-	delay := interval * 3
-	if delay < interval {
-		delay = interval
-	}
-	if delay > 30*time.Second {
-		delay = 30 * time.Second
-	}
-	return delay
+	return time.Duration(seconds) * time.Second
 }
 
-func pointCollectInterval(point config.PointConfig) time.Duration {
+func dueTolerance(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 100 * time.Millisecond
+	}
+	tolerance := interval / 10
+	if tolerance > 100*time.Millisecond {
+		return 100 * time.Millisecond
+	}
+	if tolerance < 10*time.Millisecond {
+		return 10 * time.Millisecond
+	}
+	return tolerance
+}
+
+func pointCollectInterval(point config.PointConfig, fallback time.Duration) time.Duration {
 	if point.CollectIntervalSeconds <= 0 {
+		if fallback > 0 {
+			return fallback
+		}
 		return 5 * time.Second
 	}
 	return time.Duration(point.CollectIntervalSeconds) * time.Second
@@ -179,7 +343,7 @@ func maxPointCollectInterval(points []config.PointConfig, fallback time.Duration
 		maxInterval = 5 * time.Second
 	}
 	for _, point := range points {
-		if interval := pointCollectInterval(point); interval > maxInterval {
+		if interval := pointCollectInterval(point, fallback); interval > maxInterval {
 			maxInterval = interval
 		}
 	}
@@ -207,62 +371,61 @@ const maxBatchRegisters uint16 = 125
 const maxConcurrentReads = 8
 
 func collectPoints(ctx context.Context, points []config.PointConfig) []collectResult {
-	groups := groupBatchablePoints(points)
-	used := make(map[int]bool)
+	type collectionTask struct {
+		indexes []int
+		run     func() []collectResult
+	}
+	var tasks []collectionTask
+	modbusGroups := map[string][]int{}
+	var modbusOrder []string
+	for index, point := range points {
+		if point.Metric == "" {
+			continue
+		}
+		if point.Protocol == "modbus-tcp" || point.Protocol == "modbus-rtu" {
+			key := serializedModbusKey(point)
+			if _, ok := modbusGroups[key]; !ok {
+				modbusOrder = append(modbusOrder, key)
+			}
+			modbusGroups[key] = append(modbusGroups[key], index)
+			continue
+		}
+		pointIndex := index
+		pointCopy := point
+		tasks = append(tasks, collectionTask{indexes: []int{pointIndex}, run: func() []collectResult {
+			value, err := ReadPoint(ctx, pointCopy)
+			return []collectResult{{Point: pointCopy, Value: value, Err: err}}
+		}})
+	}
+	for _, key := range modbusOrder {
+		indexes := append([]int(nil), modbusGroups[key]...)
+		tasks = append(tasks, collectionTask{indexes: indexes, run: func() []collectResult {
+			return collectSerializedModbusPoints(ctx, indexes, points)
+		}})
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxConcurrentReads)
-
-	taskCount := len(groups)
-	for index, point := range points {
-		if point.Metric == "" {
-			continue
-		}
-		if _, ok := groups[groupKey(point)]; ok && isBatchable(point) {
-			_ = index
-			continue
-		}
-		taskCount++
-	}
-	resultsCh := make(chan []collectResult, taskCount)
-	appendResults := func(items []collectResult) {
-		select {
-		case resultsCh <- items:
-		case <-ctx.Done():
-		}
-	}
-	for _, indexes := range groups {
-		for _, index := range indexes {
-			used[index] = true
-		}
-		batchIndexes := append([]int(nil), indexes...)
+	resultsCh := make(chan []collectResult, len(tasks))
+	for _, task := range tasks {
+		task := task
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			appendResults(collectRegisterBatches(ctx, batchIndexes, points))
-		}()
-	}
-
-	for index, point := range points {
-		if used[index] {
-			continue
-		}
-		if point.Metric == "" {
-			continue
-		}
-		point := point
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			value, err := ReadPoint(ctx, point)
-			if err != nil {
-				appendResults([]collectResult{{Point: point, Err: err}})
-				return
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+				resultsCh <- task.run()
+			case <-ctx.Done():
+				items := make([]collectResult, 0, len(task.indexes))
+				for _, index := range task.indexes {
+					items = append(items, collectResult{Point: points[index], Err: ctx.Err()})
+				}
+				resultsCh <- items
 			}
-			appendResults([]collectResult{{Point: point, Value: value}})
 		}()
 	}
 	done := make(chan struct{})
@@ -272,22 +435,53 @@ func collectPoints(ctx context.Context, points []config.PointConfig) []collectRe
 	}()
 
 	var results []collectResult
-	for pending := taskCount; pending > 0; {
+	for pending := len(tasks); pending > 0; {
 		select {
 		case items := <-resultsCh:
 			results = append(results, items...)
 			pending--
 		case <-done:
 			return results
-		case <-ctx.Done():
-			return results
 		}
 	}
 	return results
 }
 
-func groupBatchablePoints(points []config.PointConfig) map[string][]int {
+func serializedModbusKey(point config.PointConfig) string {
+	if point.Protocol == "modbus-rtu" {
+		return point.Protocol + "#" + point.Address
+	}
+	return fmt.Sprintf("%s#%s#%d", point.Protocol, point.Address, point.SlaveID)
+}
+
+func collectSerializedModbusPoints(ctx context.Context, indexes []int, points []config.PointConfig) []collectResult {
+	byFunction := map[byte][]int{}
+	for _, index := range indexes {
+		function := points[index].Function
+		byFunction[function] = append(byFunction[function], index)
+	}
+	var results []collectResult
+	for _, function := range []byte{3, 4, 1, 2} {
+		functionIndexes := byFunction[function]
+		if len(functionIndexes) == 0 {
+			continue
+		}
+		if function == 3 || function == 4 {
+			results = append(results, collectRegisterBatches(ctx, functionIndexes, points)...)
+			continue
+		}
+		for _, index := range functionIndexes {
+			point := points[index]
+			value, err := ReadPoint(ctx, point)
+			results = append(results, collectResult{Point: point, Value: value, Err: err})
+		}
+	}
+	return results
+}
+
+func groupBatchablePoints(points []config.PointConfig) (map[string][]int, []string) {
 	groups := make(map[string][]int)
+	var order []string
 	for index, point := range points {
 		if point.Metric == "" {
 			continue
@@ -295,9 +489,13 @@ func groupBatchablePoints(points []config.PointConfig) map[string][]int {
 		if !isBatchable(point) {
 			continue
 		}
-		groups[groupKey(point)] = append(groups[groupKey(point)], index)
+		key := groupKey(point)
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], index)
 	}
-	return groups
+	return groups, order
 }
 
 func groupKey(point config.PointConfig) string {

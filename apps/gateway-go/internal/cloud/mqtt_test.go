@@ -67,3 +67,61 @@ func TestRenderManualPayloadCustomTemplate(t *testing.T) {
 		t.Fatalf("devices were not embedded correctly: %#v", payload["devices"])
 	}
 }
+
+func TestRenderManualPayloadAttributePathTemplate(t *testing.T) {
+	client := &Client{
+		payloadMode: "custom",
+		payloadTemplate: `{
+  "all": {attribute},
+  "device": {attribute.device-1},
+  "point": {attribute.device-1.temperature},
+  "status": "{attribute.device-1.status}"
+}`,
+	}
+	grouped := map[string]map[string]interface{}{
+		"device-1": {"temperature": 23.5, "humidity": 61, "status": "ok"},
+		"device-2": {"pressure": 100.8},
+	}
+
+	payload, err := client.RenderManualPayload(map[string]interface{}{
+		"temperature": 23.5,
+		"humidity":    61,
+		"pressure":    100.8,
+		"status":      "ok",
+	}, grouped)
+	if err != nil {
+		t.Fatalf("RenderManualPayload returned error: %v", err)
+	}
+	if payload["point"] != 23.5 {
+		t.Fatalf("point attribute was not rendered correctly: %#v", payload["point"])
+	}
+	if payload["status"] != "ok" {
+		t.Fatalf("string point attribute was not rendered correctly: %#v", payload["status"])
+	}
+	device, ok := payload["device"].(map[string]interface{})
+	if !ok || device["humidity"] != float64(61) {
+		t.Fatalf("device attribute group was not rendered correctly: %#v", payload["device"])
+	}
+	all, ok := payload["all"].(map[string]interface{})
+	if !ok || all["pressure"] != 100.8 {
+		t.Fatalf("all attributes were not rendered correctly: %#v", payload["all"])
+	}
+}
+
+func TestRenderManualPayloadSingleAttributePointTemplateBecomesObject(t *testing.T) {
+	client := &Client{
+		payloadMode:     "custom",
+		payloadTemplate: `{attribute.device-001.TS}`,
+	}
+	grouped := map[string]map[string]interface{}{
+		"device-001": {"TS": 42},
+	}
+
+	payload, err := client.RenderManualPayload(map[string]interface{}{"TS": 42}, grouped)
+	if err != nil {
+		t.Fatalf("RenderManualPayload returned error: %v", err)
+	}
+	if payload["TS"] != float64(42) {
+		t.Fatalf("single point template should become TS key/value object: %#v", payload)
+	}
+}

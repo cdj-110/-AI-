@@ -55,6 +55,14 @@ func TestS7DeviceDefaultsToSmartModel(t *testing.T) {
 	}
 }
 
+func TestDeviceReconnectIntervalDefaultsToThirtySeconds(t *testing.T) {
+	device := DeviceConfig{}
+	device.ApplyDefaults()
+	if device.ReconnectIntervalSeconds != 30 {
+		t.Fatalf("ReconnectIntervalSeconds = %d, want 30", device.ReconnectIntervalSeconds)
+	}
+}
+
 func TestActivationSNBecomesEffectiveGatewayKey(t *testing.T) {
 	cfg, err := Parse([]byte(`{
   "gatewayKey": "OLD-SN",
@@ -333,5 +341,145 @@ func TestLegacyNetworkPortsMapToPhysicalInterfaces(t *testing.T) {
 	port.ApplyDefaults()
 	if port.Interface != "eth1" || port.Mode != "static" || port.PrefixLength != 24 {
 		t.Fatalf("legacy network port was not migrated: %#v", port)
+	}
+}
+
+func TestIEC104ExpandedAddressesAndLegacyFallback(t *testing.T) {
+	cfg := Config{
+		CollectIntervalSeconds: 5,
+		Channels:               []ChannelConfig{{ChannelKey: "iec", Protocol: "iec104", IEC104: IEC104Config{Configured: true}}},
+		Devices: []DeviceConfig{
+			{DeviceKey: "new", ChannelKey: "iec", Protocol: "iec104", Address: "192.168.1.10:2404", CommonAddress: 1024, Points: []PointConfig{{Metric: "large", IOA: 70000, DataType: "float32"}}},
+			{DeviceKey: "legacy", ChannelKey: "iec", Protocol: "iec104", Address: "192.168.1.11:2404", SlaveID: 7, Points: []PointConfig{{Metric: "old", Register: 123, DataType: "float32"}}},
+		},
+	}
+	cfg.ApplyDefaults()
+	points := cfg.FlattenPoints()
+	if points[0].CommonAddress != 1024 || points[0].IOA != 70000 {
+		t.Fatalf("expanded IEC104 addresses = CA %d IOA %d", points[0].CommonAddress, points[0].IOA)
+	}
+	if points[1].CommonAddress != 7 || points[1].IOA != 123 {
+		t.Fatalf("legacy IEC104 fallback = CA %d IOA %d", points[1].CommonAddress, points[1].IOA)
+	}
+}
+
+func TestIEC104ConfiguredAllOffIsPreserved(t *testing.T) {
+	options := IEC104Config{Configured: true}
+	options.ApplyDefaults()
+	if options.GeneralInterrogationOnStart || options.ClockSyncOnStart || options.CounterInterrogationOnStart || options.ClockSyncIntervalSeconds != 0 {
+		t.Fatalf("explicit all-off IEC104 options were changed: %#v", options)
+	}
+}
+
+func TestIEC104RejectsIOAOutside24BitRange(t *testing.T) {
+	_, err := Parse([]byte(`{
+  "gatewayKey":"gw-iec104-invalid",
+  "activation":{"enabled":false},
+  "mqtt":{"enabled":false},
+  "points":[{
+    "deviceKey":"station","metric":"bad","protocol":"iec104",
+    "address":"192.168.1.10:2404","commonAddress":1,
+    "ioa":16777216,"dataType":"float32"
+  }]
+}`))
+	if err == nil {
+		t.Fatal("expected IOA range validation error")
+	}
+}
+
+func TestForwardDeviceDefaultsAndEnablesServer(t *testing.T) {
+	cfg := Config{ForwardDevices: []ForwardDeviceConfig{{Protocol: "modbus-tcp-slave", Points: []ForwardPointConfig{{SourceDeviceKey: "d1", SourceMetric: "p1"}}}}}
+	cfg.ApplyDefaults()
+	device := cfg.ForwardDevices[0]
+	if !cfg.ForwardSlave.Enabled || device.DeviceKey == "" || device.UnitID != 1 {
+		t.Fatalf("forward defaults not applied: %#v", device)
+	}
+	if device.Points[0].Function != 3 || device.Points[0].Metric != "p1" || device.Points[0].Quantity != 1 || device.Points[0].Scale != 1 {
+		t.Fatalf("forward point defaults not applied: %#v", device.Points[0])
+	}
+}
+
+func TestParseRejectsInvalidForwardListenPort(t *testing.T) {
+	raw := []byte(`{"gatewayKey":"gw","forwardSlave":{"modbusListen":"0.0.0.0:70000","iec104Listen":"0.0.0.0:2404"}}`)
+	if _, err := Parse(raw); err == nil {
+		t.Fatal("Parse() accepted an invalid Modbus forwarding port")
+	}
+}
+
+func TestForwardOnlyChannelDoesNotGetCollectionProtocol(t *testing.T) {
+	cfg := Config{Channels: []ChannelConfig{{ChannelKey: "forward", Role: "forward", ForwardProtocol: "iec104-server"}}}
+	cfg.ApplyDefaults()
+	channel := cfg.Channels[0]
+	if channel.Role != "forward" || channel.Protocol != "none" || channel.ForwardProtocol != "iec104-server" {
+		t.Fatalf("forward-only channel defaults = %#v", channel)
+	}
+}
+
+func TestLegacyCollectionChannelKeepsCollectionRole(t *testing.T) {
+	cfg := Config{Channels: []ChannelConfig{{ChannelKey: "collect", Protocol: "modbus-tcp"}}}
+	cfg.ApplyDefaults()
+	if cfg.Channels[0].Role != "collect" || cfg.Channels[0].Protocol != "modbus-tcp" {
+		t.Fatalf("legacy channel defaults = %#v", cfg.Channels[0])
+	}
+}
+
+func TestLegacyForwardOnlyChannelIsInferredWithoutDevices(t *testing.T) {
+	cfg := Config{Channels: []ChannelConfig{{ChannelKey: "legacy-forward", Protocol: "modbus-tcp", ForwardProtocol: "modbus-tcp-slave"}}}
+	cfg.ApplyDefaults()
+	if cfg.Channels[0].Role != "forward" || cfg.Channels[0].Protocol != "none" {
+		t.Fatalf("legacy forward channel was not inferred: %#v", cfg.Channels[0])
+	}
+}
+
+func TestValidateGlobalDeviceKeysAcrossDeviceKinds(t *testing.T) {
+	cfg := Config{
+		Devices:        []DeviceConfig{{DeviceKey: "mbtcp-01"}},
+		ForwardDevices: []ForwardDeviceConfig{{DeviceKey: "iec104-01"}},
+		EdgeComputing:  EdgeComputingConfig{Groups: []EdgeComputeGroupConfig{{GroupKey: "edge-01"}}},
+	}
+	if err := cfg.ValidateGlobalDeviceKeys(); err != nil {
+		t.Fatalf("unique keys rejected: %v", err)
+	}
+	cfg.EdgeComputing.Groups[0].GroupKey = "MBTCP-01"
+	if err := cfg.ValidateGlobalDeviceKeys(); err == nil {
+		t.Fatal("case-insensitive duplicate key accepted")
+	}
+}
+
+func TestLegacyDuplicateDeviceKeysRemainLoadable(t *testing.T) {
+	raw := []byte(`{
+  "gatewayKey":"gw",
+  "activation":{"enabled":false},
+  "mqtt":{"enabled":false},
+  "devices":[
+    {"deviceKey":"device-006","protocol":"modbus-tcp","points":[]},
+    {"deviceKey":"device-006","protocol":"iec104","points":[]}
+  ]
+}`)
+	cfg, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("legacy duplicate config should load: %v", err)
+	}
+	if err := cfg.ValidateNewGlobalIdentifierDuplicates(cfg); err != nil {
+		t.Fatalf("unchanged legacy duplicate should remain saveable: %v", err)
+	}
+	changed := cfg
+	changed.ForwardDevices = append(changed.ForwardDevices, ForwardDeviceConfig{DeviceKey: "device-006"})
+	if err := changed.ValidateNewGlobalIdentifierDuplicates(cfg); err == nil {
+		t.Fatal("new duplicate was accepted")
+	}
+}
+
+func TestNewGlobalPointMetricDuplicateIsRejected(t *testing.T) {
+	previous := Config{Devices: []DeviceConfig{
+		{DeviceKey: "mbtcp-01", Points: []PointConfig{{Metric: "temperature"}}},
+		{DeviceKey: "iec104-01", Points: []PointConfig{{Metric: "running"}}},
+	}}
+	changed := previous
+	changed.Devices = append([]DeviceConfig(nil), previous.Devices...)
+	changed.Devices[1].Points = append([]PointConfig(nil), previous.Devices[1].Points...)
+	changed.Devices[1].Points = append(changed.Devices[1].Points, PointConfig{Metric: "Temperature"})
+	if err := changed.ValidateNewGlobalIdentifierDuplicates(previous); err == nil {
+		t.Fatal("new case-insensitive point metric duplicate was accepted")
 	}
 }

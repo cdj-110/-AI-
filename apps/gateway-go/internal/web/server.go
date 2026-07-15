@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 
 	"weikong-iot-platform/apps/gateway-go/internal/cloud"
 	"weikong-iot-platform/apps/gateway-go/internal/config"
+	"weikong-iot-platform/apps/gateway-go/internal/datamanager"
+	"weikong-iot-platform/apps/gateway-go/internal/edgecompute"
 	"weikong-iot-platform/apps/gateway-go/internal/hardware"
 	gatewayruntime "weikong-iot-platform/apps/gateway-go/internal/runtime"
 	"weikong-iot-platform/apps/gateway-go/internal/state"
@@ -25,10 +28,11 @@ type Server struct {
 	runtime    *gatewayruntime.Manager
 	configPath string
 	onConfig   func(config.Config)
+	data       *datamanager.Manager
 }
 
 func New(cfg config.ListenerConfig, store *state.Store, runtime *gatewayruntime.Manager, configPath string, onConfig func(config.Config)) *Server {
-	return &Server{cfg: cfg, store: store, runtime: runtime, configPath: configPath, onConfig: onConfig, auth: newAuthManager()}
+	return &Server{cfg: cfg, store: store, runtime: runtime, configPath: configPath, onConfig: onConfig, auth: newAuthManager(), data: datamanager.New(store)}
 }
 
 func (s *Server) Run(ctx context.Context) {
@@ -39,6 +43,7 @@ func (s *Server) Run(ctx context.Context) {
 	if listen == "" {
 		listen = "0.0.0.0:8088"
 	}
+	s.data.Start(ctx)
 
 	server := &http.Server{
 		Addr:              listen,
@@ -63,8 +68,12 @@ func (s *Server) routes() http.Handler {
 	protected := http.NewServeMux()
 	protected.HandleFunc("/", s.index)
 	protected.HandleFunc("/api/config", s.configFile)
+	protected.HandleFunc("/api/project/export", s.projectFile)
+	protected.HandleFunc("/api/project/import", s.projectFile)
 	protected.HandleFunc("/api/activation", s.requirePermission("cloud.manage", s.activationFile))
 	protected.HandleFunc("/api/collect-now", s.requirePermission("config.manage", s.collectNow))
+	protected.HandleFunc("/api/points/write", s.requirePermission("config.manage", s.writePoint))
+	protected.HandleFunc("/api/edge-compute/validate", s.requirePermission("config.manage", s.validateEdgeCompute))
 	protected.HandleFunc("/api/mqtt/test-publish", s.requirePermission("cloud.manage", s.testMQTTPublish))
 	protected.HandleFunc("/api/pdf-points/preview", s.requirePermission("config.manage", s.previewPDFPoints))
 	protected.HandleFunc("/api/iec61850/cid/preview", s.requirePermission("config.manage", s.previewIEC61850CID))
@@ -80,18 +89,56 @@ func (s *Server) routes() http.Handler {
 	protected.HandleFunc("/api/network/wifi/scan", s.requirePermission("network.manage", s.scanWiFiNetwork))
 	protected.HandleFunc("/api/network/cellular", s.requirePermission("network.manage", s.cellularNetwork))
 	protected.HandleFunc("/api/storage", s.requirePermission("config.manage", s.storageStatus))
+	protected.HandleFunc("/api/history-storage", s.requirePermission("config.manage", s.historyStorageStatus))
+	protected.HandleFunc("/api/history-storage/export", s.requirePermission("config.manage", s.exportHistoryStorage))
 	protected.HandleFunc("/api/maintenance/ping", s.requirePermission("maintenance.run", s.pingDiagnostic))
 	protected.HandleFunc("/api/maintenance/restart", s.requirePermission("maintenance.run", s.restartService))
 	protected.HandleFunc("/api/maintenance/reboot", s.requirePermission("maintenance.run", s.rebootGateway))
+	protected.HandleFunc("/api/maintenance/factory-reset", s.requirePermission("maintenance.run", s.factoryReset))
 	protected.HandleFunc("/api/security", s.securityFile)
+	protected.HandleFunc("/api/ws", s.webSocket)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", s.status)
+	mux.HandleFunc("/api/point-status", s.pointStatus)
 	mux.HandleFunc("/brand-logo.png", serveBrandLogo)
 	mux.HandleFunc("/login", s.login)
 	mux.HandleFunc("/logout", s.logout)
 	mux.Handle("/", s.requireAuth(protected))
 	return mux
+}
+
+func (s *Server) validateEdgeCompute(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.store == nil {
+		http.Error(writer, "gateway state is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		Content  string `json:"content"`
+		GroupKey string `json:"groupKey"`
+		Metric   string `json:"metric"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 32*1024*1024))
+	if err := decoder.Decode(&body); err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	cfg, err := config.Parse([]byte(body.Content))
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	value, inputs, err := edgecompute.Preview(cfg, s.store, strings.TrimSpace(body.GroupKey), strings.TrimSpace(body.Metric))
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(writer).Encode(map[string]interface{}{"ok": true, "value": value, "inputs": inputs})
 }
 
 func (s *Server) requirePermission(permission string, next http.HandlerFunc) http.HandlerFunc {
@@ -107,6 +154,32 @@ func (s *Server) requirePermission(permission string, next http.HandlerFunc) htt
 func (s *Server) status(writer http.ResponseWriter, _ *http.Request) {
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(writer).Encode(s.store.Snapshot())
+}
+
+func (s *Server) pointStatus(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	points := s.store.PointStatuses()
+	requestedDevices := request.URL.Query()["deviceKey"]
+	if len(requestedDevices) > 0 {
+		allowed := make(map[string]struct{}, len(requestedDevices))
+		for _, deviceKey := range requestedDevices {
+			if deviceKey = strings.TrimSpace(deviceKey); deviceKey != "" {
+				allowed[deviceKey] = struct{}{}
+			}
+		}
+		filtered := make([]state.PointStatus, 0, len(points))
+		for _, point := range points {
+			if _, ok := allowed[point.DeviceKey]; ok {
+				filtered = append(filtered, point)
+			}
+		}
+		points = filtered
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(writer).Encode(points)
 }
 
 func (s *Server) configFile(writer http.ResponseWriter, request *http.Request) {
@@ -156,6 +229,16 @@ func (s *Server) saveConfig(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if previous, previousErr := s.readRawConfig(); previousErr == nil {
+		if err := cfg.ValidateNewGlobalIdentifierDuplicates(previous); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if err := edgecompute.Validate(cfg); err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := config.Save(s.configPath, cfg); err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
@@ -179,6 +262,50 @@ func (s *Server) collectNow(writer http.ResponseWriter, request *http.Request) {
 	s.runtime.CollectOnce(collectCtx)
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(writer).Encode(s.store.Snapshot())
+}
+
+func (s *Server) writePoint(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.runtime == nil {
+		http.Error(writer, "gateway runtime is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		DeviceKey string      `json:"deviceKey"`
+		Metric    string      `json:"metric"`
+		Value     interface{} `json:"value"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64*1024))
+	decoder.UseNumber()
+	if err := decoder.Decode(&body); err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	body.DeviceKey = strings.TrimSpace(body.DeviceKey)
+	body.Metric = strings.TrimSpace(body.Metric)
+	if body.DeviceKey == "" || body.Metric == "" || body.Value == nil {
+		http.Error(writer, "deviceKey, metric and value are required", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 5*time.Second)
+	defer cancel()
+	point, err := s.runtime.WritePoint(ctx, body.DeviceKey, body.Metric, body.Value)
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(err, gatewayruntime.ErrWritablePointNotFound) {
+			status = http.StatusBadRequest
+		}
+		http.Error(writer, err.Error(), status)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(writer).Encode(map[string]interface{}{
+		"ok": true, "deviceKey": point.DeviceKey, "metric": point.Metric,
+		"value": body.Value, "readFunction": point.Function,
+	})
 }
 
 func (s *Server) activationFile(writer http.ResponseWriter, request *http.Request) {

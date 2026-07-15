@@ -15,16 +15,35 @@ import (
 
 type ModbusTCP struct{}
 
+// Some industrial Modbus TCP slaves only produce a response on their own
+// scan boundary. Keep the socket timeout longer than the UI collection period;
+// collection lanes isolate a slow slave so it cannot delay other devices.
+const modbusTCPTimeout = 3 * time.Second
+
 type tcpConnection struct {
 	handler *modbus.TCPClientHandler
 	client  modbus.Client
-	mu      sync.Mutex
+	gate    *priorityConnectionLock
 }
 
-var tcpPool = struct {
+type priorityConnectionLock struct {
+	mu           sync.Mutex
+	held         bool
+	writeWaiters int
+	changed      chan struct{}
+}
+
+func newPriorityConnectionLock() *priorityConnectionLock {
+	return &priorityConnectionLock{changed: make(chan struct{})}
+}
+
+type tcpConnectionPool struct {
 	sync.Mutex
 	items map[string]*tcpConnection
-}{items: map[string]*tcpConnection{}}
+}
+
+var tcpPool = tcpConnectionPool{items: map[string]*tcpConnection{}}
+var tcpWritePool = tcpConnectionPool{items: map[string]*tcpConnection{}}
 
 func (ModbusTCP) ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
 	conn, err := getTCPConnection(point)
@@ -32,11 +51,13 @@ func (ModbusTCP) ReadPoint(ctx context.Context, point config.PointConfig) (model
 		return model.PointValue{}, err
 	}
 
-	conn.mu.Lock()
+	if err := conn.lockRead(ctx); err != nil {
+		return model.PointValue{}, fmt.Errorf("%w: %v", ErrCollectionDeferred, err)
+	}
 	raw, err := readByFunction(ctx, conn.client, point)
-	conn.mu.Unlock()
+	conn.unlock()
 	if err != nil {
-		closeTCPConnection(point)
+		closeTCPConnection(point, conn)
 		return model.PointValue{}, err
 	}
 	value, err := mapper.Decode(point, raw)
@@ -56,67 +77,142 @@ func (ModbusTCP) ReadRegisterRange(ctx context.Context, point config.PointConfig
 	rangePoint.Register = start
 	rangePoint.Quantity = quantity
 
-	conn.mu.Lock()
+	if err := conn.lockRead(ctx); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCollectionDeferred, err)
+	}
 	raw, err := readByFunction(ctx, conn.client, rangePoint)
-	conn.mu.Unlock()
+	conn.unlock()
 	if err != nil {
-		closeTCPConnection(point)
+		closeTCPConnection(point, conn)
 		return nil, err
 	}
 	return raw, nil
 }
 
 func (ModbusTCP) WritePoint(ctx context.Context, point config.PointConfig, value interface{}) error {
-	conn, err := getTCPConnection(point)
+	conn, err := getTCPWriteConnection(point)
 	if err != nil {
 		return err
 	}
-	conn.mu.Lock()
+	if err := conn.lockWrite(ctx); err != nil {
+		return err
+	}
 	err = writeByFunction(ctx, conn.client, point, value)
-	conn.mu.Unlock()
+	conn.unlock()
 	if err != nil {
-		closeTCPConnection(point)
+		closeTCPWriteConnection(point, conn)
 	}
 	return err
 }
 
 func getTCPConnection(point config.PointConfig) (*tcpConnection, error) {
+	return getTCPConnectionFromPool(&tcpPool, point)
+}
+
+func getTCPWriteConnection(point config.PointConfig) (*tcpConnection, error) {
+	return getTCPConnectionFromPool(&tcpWritePool, point)
+}
+
+func getTCPConnectionFromPool(pool *tcpConnectionPool, point config.PointConfig) (*tcpConnection, error) {
 	key := tcpConnectionKey(point)
-	tcpPool.Lock()
-	if conn := tcpPool.items[key]; conn != nil {
-		tcpPool.Unlock()
+	pool.Lock()
+	if conn := pool.items[key]; conn != nil {
+		pool.Unlock()
 		return conn, nil
 	}
-	tcpPool.Unlock()
+	pool.Unlock()
 
 	handler := modbus.NewTCPClientHandler(point.Address)
 	handler.SlaveId = point.SlaveID
-	handler.Timeout = 1200 * time.Millisecond
+	handler.Timeout = modbusTCPTimeout
 	if err := handler.Connect(); err != nil {
 		return nil, err
 	}
-	conn := &tcpConnection{handler: handler, client: modbus.NewClient(handler)}
+	conn := &tcpConnection{handler: handler, client: modbus.NewClient(handler), gate: newPriorityConnectionLock()}
 
-	tcpPool.Lock()
-	if existing := tcpPool.items[key]; existing != nil {
-		tcpPool.Unlock()
+	pool.Lock()
+	if existing := pool.items[key]; existing != nil {
+		pool.Unlock()
 		_ = handler.Close()
 		return existing, nil
 	}
-	tcpPool.items[key] = conn
-	tcpPool.Unlock()
+	pool.items[key] = conn
+	pool.Unlock()
 	return conn, nil
 }
 
-func closeTCPConnection(point config.PointConfig) {
+func closeTCPConnection(point config.PointConfig, target *tcpConnection) {
+	closeTCPConnectionFromPool(&tcpPool, point, target)
+}
+
+func closeTCPWriteConnection(point config.PointConfig, target *tcpConnection) {
+	closeTCPConnectionFromPool(&tcpWritePool, point, target)
+}
+
+func closeTCPConnectionFromPool(pool *tcpConnectionPool, point config.PointConfig, target *tcpConnection) {
 	key := tcpConnectionKey(point)
-	tcpPool.Lock()
-	conn := tcpPool.items[key]
-	delete(tcpPool.items, key)
-	tcpPool.Unlock()
-	if conn != nil {
-		_ = conn.handler.Close()
+	pool.Lock()
+	conn := pool.items[key]
+	if conn == target {
+		delete(pool.items, key)
 	}
+	pool.Unlock()
+	if conn == target {
+		_ = target.handler.Close()
+	}
+}
+
+func (c *tcpConnection) lockRead(ctx context.Context) error {
+	return c.gate.lock(ctx, false)
+}
+
+func (c *tcpConnection) lockWrite(ctx context.Context) error {
+	return c.gate.lock(ctx, true)
+}
+
+func (c *tcpConnection) unlock() {
+	c.gate.unlock()
+}
+
+func (l *priorityConnectionLock) lock(ctx context.Context, write bool) error {
+	l.mu.Lock()
+	if write {
+		l.writeWaiters++
+	}
+	for l.held || (!write && l.writeWaiters > 0) {
+		changed := l.changed
+		l.mu.Unlock()
+		select {
+		case <-changed:
+			l.mu.Lock()
+		case <-ctx.Done():
+			l.mu.Lock()
+			if write {
+				l.writeWaiters--
+				l.notifyLocked()
+			}
+			l.mu.Unlock()
+			return ctx.Err()
+		}
+	}
+	if write {
+		l.writeWaiters--
+	}
+	l.held = true
+	l.mu.Unlock()
+	return nil
+}
+
+func (l *priorityConnectionLock) unlock() {
+	l.mu.Lock()
+	l.held = false
+	l.notifyLocked()
+	l.mu.Unlock()
+}
+
+func (l *priorityConnectionLock) notifyLocked() {
+	close(l.changed)
+	l.changed = make(chan struct{})
 }
 
 func tcpConnectionKey(point config.PointConfig) string {

@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,9 +14,10 @@ import (
 
 	"weikong-iot-platform/apps/gateway-go/internal/cache"
 	"weikong-iot-platform/apps/gateway-go/internal/cloud"
-	"weikong-iot-platform/apps/gateway-go/internal/collector"
 	"weikong-iot-platform/apps/gateway-go/internal/config"
+	"weikong-iot-platform/apps/gateway-go/internal/edgecompute"
 	"weikong-iot-platform/apps/gateway-go/internal/forward"
+	"weikong-iot-platform/apps/gateway-go/internal/history"
 	"weikong-iot-platform/apps/gateway-go/internal/model"
 	gatewayruntime "weikong-iot-platform/apps/gateway-go/internal/runtime"
 	"weikong-iot-platform/apps/gateway-go/internal/state"
@@ -32,28 +34,44 @@ type App struct {
 	cloudConfig   map[string]string
 	spoolMu       sync.Mutex
 	spool         *cache.Spool
+	historyMu     sync.Mutex
+	history       *history.Store
 	state         *state.Store
 	runtime       *gatewayruntime.Manager
 	forward       *forward.Manager
-	collectSem    chan struct{}
-	configChanged chan struct{}
+	edge          *edgecompute.Manager
+	collectMu     sync.Mutex
+	runCtx        context.Context
+	collectCancel context.CancelFunc
+	publishMu     sync.Mutex
+	publishQueue  chan telemetryBatch
 }
 
-func New(cfg config.Config, configPath string) *App {
+type telemetryBatch struct {
+	Time    time.Time
+	Grouped map[string]map[string]interface{}
+}
+
+func New(cfg config.Config, configPath string) (*App, error) {
 	store := state.New(cfg)
 	manager := gatewayruntime.NewManager(cfg, store)
-	return &App{
-		cfg:           cfg,
-		configPath:    configPath,
-		cloudState:    map[string]bool{},
-		cloudConfig:   map[string]string{},
-		spool:         offlineSpool(cfg),
-		state:         store,
-		runtime:       manager,
-		forward:       forward.NewManager(store),
-		collectSem:    make(chan struct{}, 1),
-		configChanged: make(chan struct{}, 1),
+	edge, err := edgecompute.NewManager(cfg, store)
+	if err != nil {
+		return nil, err
 	}
+	return &App{
+		cfg:          cfg,
+		configPath:   configPath,
+		cloudState:   map[string]bool{},
+		cloudConfig:  map[string]string{},
+		spool:        offlineSpool(cfg),
+		history:      historyStore(cfg),
+		state:        store,
+		runtime:      manager,
+		forward:      forward.NewManager(store, manager),
+		edge:         edge,
+		publishQueue: make(chan telemetryBatch, 10000),
+	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -65,24 +83,14 @@ func (a *App) Run(ctx context.Context) error {
 
 	log.Printf("gateway %s started, points=%d", a.cfg.GatewayKey, len(a.cfg.Points))
 	go a.heartbeatLoop(ctx)
-	go a.collectAndPublish(ctx)
-	for {
-		interval := a.runtime.CollectInterval()
-		if interval <= 0 {
-			interval = time.Second
-		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil
-		case <-a.configChanged:
-			timer.Stop()
-			continue
-		case <-timer.C:
-			go a.collectAndPublish(ctx)
-		}
-	}
+	go a.topologyLoop(ctx)
+	go a.publishLoop(ctx)
+	go a.edge.Start(ctx)
+	go a.edgeBatchLoop(ctx)
+	a.startCollectWorkers(ctx)
+	defer a.stopCollectWorkers()
+	<-ctx.Done()
+	return nil
 }
 
 func (a *App) heartbeatLoop(ctx context.Context) {
@@ -100,9 +108,15 @@ func (a *App) heartbeatLoop(ctx context.Context) {
 }
 
 func (a *App) publishGatewayHeartbeat() {
+	if len(a.publishQueue) > 0 {
+		return
+	}
 	a.cloudMu.Lock()
 	clients := a.connectedCloudsLocked()
 	a.cloudMu.Unlock()
+	a.publishMu.Lock()
+	defer a.publishMu.Unlock()
+	var heartbeatClients []*cloud.Client
 	for _, client := range clients {
 		if client.IsManual() {
 			continue
@@ -112,42 +126,188 @@ func (a *App) publishGatewayHeartbeat() {
 			a.state.AddError("publish gateway heartbeat failed " + client.Name() + ": " + err.Error())
 			continue
 		}
+		heartbeatClients = append(heartbeatClients, client)
+		a.state.MarkPublish()
+	}
+	a.publishChildHeartbeatsLocked(heartbeatClients)
+}
+
+func (a *App) topologyLoop(ctx context.Context) {
+	a.publishTopology()
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.publishTopology()
+		}
+	}
+}
+
+func (a *App) publishTopology() {
+	if len(a.publishQueue) > 0 {
+		return
+	}
+	a.cloudMu.Lock()
+	clients := a.connectedCloudsLocked()
+	a.cloudMu.Unlock()
+	topology := topologySnapshot(a.runtime.Config())
+	a.publishMu.Lock()
+	defer a.publishMu.Unlock()
+	for _, client := range clients {
+		if client.IsManual() {
+			continue
+		}
+		if err := client.PublishTopology(topology); err != nil {
+			log.Printf("publish topology failed channel=%s: %v", client.Name(), err)
+			a.state.AddError("publish topology failed " + client.Name() + ": " + err.Error())
+			continue
+		}
 		a.state.MarkPublish()
 	}
 }
 
 func (a *App) ApplyConfig(cfg config.Config) {
+	if err := edgecompute.Validate(cfg); err != nil {
+		a.state.AddError("edge compute config rejected: " + err.Error())
+		return
+	}
 	oldCfg := a.runtime.Config()
 	a.runtime.UpdateConfig(cfg)
+	if err := a.edge.UpdateConfig(cfg); err != nil {
+		a.state.AddError("edge compute reload failed: " + err.Error())
+		return
+	}
 	a.forward.Update(context.Background(), cfg)
 	a.cfg = cfg
 	a.spoolMu.Lock()
 	a.spool = offlineSpool(cfg)
 	a.spoolMu.Unlock()
+	a.historyMu.Lock()
+	a.history = historyStore(cfg)
+	a.historyMu.Unlock()
 	if !oldCfg.MQTT.Equal(cfg.MQTT) || !config.EqualMQTTChannels(oldCfg.MQTTChannels, cfg.MQTTChannels) || !oldCfg.Activation.Equal(cfg.Activation) {
 		a.syncCloud(cfg)
 	}
-	select {
-	case a.configChanged <- struct{}{}:
-	default:
+	a.restartCollectWorkers()
+	go a.publishTopology()
+}
+
+func (a *App) edgeBatchLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case batch := <-a.edge.Output():
+			telemetry := telemetryBatch{Time: batch.Time, Grouped: batch.Grouped}
+			a.recordHistory(telemetry)
+			a.enqueueTelemetry(telemetry)
+		}
 	}
 }
 
-func (a *App) collectAndPublish(ctx context.Context) {
-	select {
-	case a.collectSem <- struct{}{}:
-	default:
+func (a *App) startCollectWorkers(parent context.Context) {
+	if parent == nil {
 		return
 	}
-	grouped := a.runtime.CollectOnce(ctx)
-	<-a.collectSem
+	a.collectMu.Lock()
+	defer a.collectMu.Unlock()
+	if a.collectCancel != nil {
+		a.collectCancel()
+	}
+	workerCtx, cancel := context.WithCancel(parent)
+	a.runCtx = parent
+	a.collectCancel = cancel
+	lanes := a.runtime.CollectionLanes()
+	if len(lanes) == 0 {
+		log.Printf("collect workers skipped: no points configured")
+		return
+	}
+	log.Printf("collect workers started lanes=%d", len(lanes))
+	for _, lane := range lanes {
+		lane := lane
+		log.Printf("collect lane started key=%s device=%s channel=%s points=%d interval=%s", lane.Key, lane.DeviceKey, lane.Channel, len(lane.Points), lane.Interval)
+		go a.collectLaneLoop(workerCtx, lane)
+	}
+}
+
+func (a *App) restartCollectWorkers() {
+	a.collectMu.Lock()
+	parent := a.runCtx
+	a.collectMu.Unlock()
+	if parent == nil {
+		return
+	}
+	a.startCollectWorkers(parent)
+}
+
+func (a *App) stopCollectWorkers() {
+	a.collectMu.Lock()
+	defer a.collectMu.Unlock()
+	if a.collectCancel != nil {
+		a.collectCancel()
+		a.collectCancel = nil
+	}
+}
+
+func (a *App) collectLaneLoop(ctx context.Context, lane gatewayruntime.CollectionLane) {
+	a.collectLaneAndPublish(ctx, lane.Key)
+	interval := lane.Interval
+	if interval <= 0 {
+		interval = a.runtime.CollectInterval()
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.collectLaneAndPublish(ctx, lane.Key)
+		}
+	}
+}
+
+func (a *App) collectLaneAndPublish(ctx context.Context, laneKey string) {
+	grouped := a.runtime.CollectLane(ctx, laneKey, false)
 	if len(grouped) == 0 {
 		return
 	}
-	a.publishToCloud(grouped)
+	batch := telemetryBatch{Time: time.Now(), Grouped: grouped}
+	a.recordHistory(batch)
+	a.enqueueTelemetry(batch)
 }
 
-func (a *App) publishToCloud(grouped map[string]map[string]interface{}) {
+func (a *App) publishLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case batch := <-a.publishQueue:
+			a.publishToCloud(batch)
+		}
+	}
+}
+
+func (a *App) enqueueTelemetry(batch telemetryBatch) {
+	select {
+	case a.publishQueue <- batch:
+	default:
+		log.Printf("publish queue full, spooling telemetry batch devices=%d", len(batch.Grouped))
+		a.state.AddError("publish queue full, spooling telemetry batch")
+		a.spoolTelemetry(batch)
+	}
+}
+
+func (a *App) publishToCloud(batch telemetryBatch) {
+	a.publishMu.Lock()
+	defer a.publishMu.Unlock()
+	grouped := batch.Grouped
 	grouped = mqttGroupedValues(a.runtime.Config(), grouped)
 	a.cloudMu.Lock()
 	clients := a.connectedCloudsLocked()
@@ -172,15 +332,11 @@ func (a *App) publishToCloud(grouped map[string]map[string]interface{}) {
 	}
 
 	for deviceKey, metrics := range grouped {
-		reading := model.Reading{DeviceKey: deviceKey, Time: time.Now(), Metrics: metrics}
+		reading := model.Reading{DeviceKey: deviceKey, Time: batch.Time, Metrics: metrics}
 		platformPublished := false
 		for _, client := range clients {
 			if client.IsManual() {
 				continue
-			}
-			if err := client.PublishChildHeartbeat(deviceKey); err != nil {
-				log.Printf("publish child heartbeat failed channel=%s device=%s: %v", client.Name(), deviceKey, err)
-				a.state.AddError("publish child heartbeat failed " + client.Name() + "/" + deviceKey + ": " + err.Error())
 			}
 			if err := client.PublishTelemetry(reading); err != nil {
 				log.Printf("publish telemetry failed channel=%s device=%s: %v", client.Name(), deviceKey, err)
@@ -205,6 +361,50 @@ func (a *App) publishToCloud(grouped map[string]map[string]interface{}) {
 	}
 }
 
+func (a *App) publishChildHeartbeatsLocked(clients []*cloud.Client) {
+	for _, deviceKey := range childDeviceKeys(a.runtime.Config()) {
+		for _, client := range clients {
+			if client.IsManual() {
+				continue
+			}
+			if err := client.PublishChildHeartbeat(deviceKey); err != nil {
+				log.Printf("publish child heartbeat failed channel=%s device=%s: %v", client.Name(), deviceKey, err)
+				a.state.AddError("publish child heartbeat failed " + client.Name() + "/" + deviceKey + ": " + err.Error())
+			}
+		}
+	}
+}
+
+func (a *App) spoolTelemetry(batch telemetryBatch) {
+	grouped := mqttGroupedValues(a.runtime.Config(), batch.Grouped)
+	for deviceKey, metrics := range grouped {
+		reading := model.Reading{DeviceKey: deviceKey, Time: batch.Time, Metrics: metrics}
+		a.spoolMu.Lock()
+		cacheErr := a.spool.Append(reading)
+		a.spoolMu.Unlock()
+		if cacheErr != nil && cacheErr != cache.ErrDisabled {
+			log.Printf("append spool failed: %v", cacheErr)
+			a.state.AddError("append spool failed: " + cacheErr.Error())
+		}
+	}
+}
+
+func (a *App) recordHistory(batch telemetryBatch) {
+	grouped := mqttGroupedValues(a.runtime.Config(), batch.Grouped)
+	a.historyMu.Lock()
+	store := a.history
+	a.historyMu.Unlock()
+	for deviceKey, metrics := range grouped {
+		if len(metrics) == 0 {
+			continue
+		}
+		if err := store.Append(model.Reading{DeviceKey: deviceKey, Time: batch.Time, Metrics: metrics}); err != nil && err != history.ErrDisabled {
+			log.Printf("append history failed: %v", err)
+			a.state.AddError("append history failed: " + err.Error())
+		}
+	}
+}
+
 func mqttGroupedValues(cfg config.Config, grouped map[string]map[string]interface{}) map[string]map[string]interface{} {
 	converters := modbusCoilMetricSet(cfg.Points)
 	if len(converters) == 0 || len(grouped) == 0 {
@@ -223,6 +423,158 @@ func mqttGroupedValues(cfg config.Config, grouped map[string]map[string]interfac
 		converted[deviceKey] = convertedMetrics
 	}
 	return converted
+}
+
+type topologyMetric struct {
+	Identifier string `json:"identifier"`
+	Name       string `json:"name,omitempty"`
+	DataType   string `json:"dataType,omitempty"`
+	Unit       string `json:"unit,omitempty"`
+}
+
+type topologyDevice struct {
+	DeviceKey     string           `json:"deviceKey"`
+	Name          string           `json:"name,omitempty"`
+	Protocol      string           `json:"protocol,omitempty"`
+	Address       string           `json:"address,omitempty"`
+	SlaveID       byte             `json:"slaveId,omitempty"`
+	CommonAddress uint16           `json:"commonAddress,omitempty"`
+	PointCount    int              `json:"pointCount"`
+	Metrics       []topologyMetric `json:"metrics"`
+}
+
+func topologySnapshot(cfg config.Config) map[string]interface{} {
+	devices := topologyDevices(cfg)
+	raw, _ := json.Marshal(devices)
+	sum := sha1.Sum(raw)
+	return map[string]interface{}{
+		"gatewayKey":    cfg.GatewayKey,
+		"configVersion": fmt.Sprintf("%x", sum[:8]),
+		"updatedAt":     time.Now().Format(time.RFC3339Nano),
+		"devices":       devices,
+	}
+}
+
+func topologyDevices(cfg config.Config) []topologyDevice {
+	if len(cfg.Devices) > 0 {
+		devices := make([]topologyDevice, 0, len(cfg.Devices))
+		for _, device := range cfg.Devices {
+			if device.DeviceKey == "" {
+				continue
+			}
+			metrics := topologyMetrics(device.Points)
+			devices = append(devices, topologyDevice{
+				DeviceKey:     device.DeviceKey,
+				Name:          device.Name,
+				Protocol:      device.Protocol,
+				Address:       device.Address,
+				SlaveID:       device.SlaveID,
+				CommonAddress: device.CommonAddress,
+				PointCount:    len(metrics),
+				Metrics:       metrics,
+			})
+		}
+		devices = append(devices, edgeTopologyDevices(cfg)...)
+		return devices
+	}
+	byKey := map[string]*topologyDevice{}
+	order := []string{}
+	for _, point := range cfg.Points {
+		if point.DeviceKey == "" {
+			continue
+		}
+		current := byKey[point.DeviceKey]
+		if current == nil {
+			current = &topologyDevice{
+				DeviceKey:     point.DeviceKey,
+				Protocol:      point.Protocol,
+				Address:       point.Address,
+				SlaveID:       point.SlaveID,
+				CommonAddress: point.CommonAddress,
+			}
+			byKey[point.DeviceKey] = current
+			order = append(order, point.DeviceKey)
+		}
+		current.Metrics = append(current.Metrics, topologyMetric{
+			Identifier: point.Metric,
+			Name:       point.Name,
+			DataType:   point.DataType,
+			Unit:       point.Unit,
+		})
+		current.PointCount = len(current.Metrics)
+	}
+	devices := make([]topologyDevice, 0, len(order))
+	for _, key := range order {
+		devices = append(devices, *byKey[key])
+	}
+	devices = append(devices, edgeTopologyDevices(cfg)...)
+	return devices
+}
+
+func edgeTopologyDevices(cfg config.Config) []topologyDevice {
+	if !cfg.EdgeComputing.Enabled {
+		return nil
+	}
+	var devices []topologyDevice
+	for _, group := range cfg.EdgeComputing.Groups {
+		if !group.IsEnabled() {
+			continue
+		}
+		var metrics []topologyMetric
+		for _, point := range group.Points {
+			if point.IsEnabled() {
+				metrics = append(metrics, topologyMetric{Identifier: point.Metric, Name: point.Name, DataType: point.DataType, Unit: point.Unit})
+			}
+		}
+		devices = append(devices, topologyDevice{DeviceKey: group.GroupKey, Name: group.Name, Protocol: "edge-compute", Address: group.GroupKey, PointCount: len(metrics), Metrics: metrics})
+	}
+	return devices
+}
+
+func topologyMetrics(points []config.PointConfig) []topologyMetric {
+	metrics := make([]topologyMetric, 0, len(points))
+	for _, point := range points {
+		if point.Metric == "" {
+			continue
+		}
+		metrics = append(metrics, topologyMetric{
+			Identifier: point.Metric,
+			Name:       point.Name,
+			DataType:   point.DataType,
+			Unit:       point.Unit,
+		})
+	}
+	return metrics
+}
+
+func childDeviceKeys(cfg config.Config) []string {
+	seen := map[string]bool{}
+	var keys []string
+	for _, device := range cfg.Devices {
+		if device.DeviceKey == "" || seen[device.DeviceKey] {
+			continue
+		}
+		seen[device.DeviceKey] = true
+		keys = append(keys, device.DeviceKey)
+	}
+	if len(cfg.Devices) == 0 {
+		for _, point := range cfg.Points {
+			if point.DeviceKey == "" || seen[point.DeviceKey] {
+				continue
+			}
+			seen[point.DeviceKey] = true
+			keys = append(keys, point.DeviceKey)
+		}
+	}
+	if cfg.EdgeComputing.Enabled {
+		for _, group := range cfg.EdgeComputing.Groups {
+			if group.IsEnabled() && group.GroupKey != "" && !seen[group.GroupKey] {
+				seen[group.GroupKey] = true
+				keys = append(keys, group.GroupKey)
+			}
+		}
+	}
+	return keys
 }
 
 func modbusCoilMetricSet(points []config.PointConfig) map[string]bool {
@@ -266,6 +618,24 @@ func offlineSpool(cfg config.Config) *cache.Spool {
 	path := filepath.Join(device.MountPath, ".weikong", "gateway-spool.jsonl")
 	log.Printf("offline cache enabled path=%s max=%dMB free=%dMB", path, cfg.OfflineCache.MaxSizeMB, device.FreeBytes/1024/1024)
 	return cache.NewGuarded(path, maxBytes, func() bool {
+		current, mounted := storage.Find(device.MountPath)
+		return mounted && current.Device == device.Device
+	})
+}
+
+func historyStore(cfg config.Config) *history.Store {
+	if !cfg.HistoryStorage.Enabled {
+		return history.Disabled()
+	}
+	device, ok := storage.Find(cfg.HistoryStorage.StoragePath)
+	if !ok {
+		log.Printf("history storage disabled: removable storage %q is not mounted", cfg.HistoryStorage.StoragePath)
+		return history.Disabled()
+	}
+	maxBytes := int64(cfg.HistoryStorage.MaxSizeMB) * 1024 * 1024
+	path := history.Path(device.MountPath)
+	log.Printf("history storage enabled path=%s max=%dMB free=%dMB", path, cfg.HistoryStorage.MaxSizeMB, device.FreeBytes/1024/1024)
+	return history.NewGuarded(path, maxBytes, func() bool {
 		current, mounted := storage.Find(device.MountPath)
 		return mounted && current.Device == device.Device
 	})
@@ -416,6 +786,9 @@ func (a *App) applyRemoteConfig(command cloud.RemoteConfigCommand) cloud.RemoteC
 	if err != nil {
 		return cloud.RemoteConfigResult{Status: "FAILED", Message: "閰嶇疆鏍￠獙澶辫触: " + err.Error()}
 	}
+	if err := edgecompute.Validate(validated); err != nil {
+		return cloud.RemoteConfigResult{Status: "FAILED", Message: "边缘计算配置无效: " + err.Error()}
+	}
 	oldRaw, err := os.ReadFile(a.configPath)
 	if err != nil {
 		return cloud.RemoteConfigResult{Status: "FAILED", Message: "璇诲彇褰撳墠閰嶇疆澶辫触: " + err.Error()}
@@ -479,50 +852,10 @@ func (a *App) writeAttribute(command attributeSetCommand) error {
 	if command.Metric == "" {
 		return fmt.Errorf("metric is required")
 	}
-	point, ok := findWritablePoint(a.runtime.Config(), command.DeviceKey, command.Metric)
-	if !ok {
-		return fmt.Errorf("writable point not found for metric %s", command.Metric)
-	}
-	writer, err := collector.New(point.Protocol)
-	if err != nil {
-		return err
-	}
-	pointWriter, ok := writer.(collector.PointWriter)
-	if !ok {
-		return fmt.Errorf("protocol %s does not support write", point.Protocol)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := pointWriter.WritePoint(ctx, point, command.Value); err != nil {
-		return err
-	}
-	a.state.SetPointValue(point.DeviceKey, point.Metric, command.Value)
-	return nil
-}
-
-func findWritablePoint(cfg config.Config, deviceKey string, metric string) (config.PointConfig, bool) {
-	for _, point := range cfg.Points {
-		if point.Metric != metric {
-			continue
-		}
-		if deviceKey != "" && point.DeviceKey != deviceKey {
-			continue
-		}
-		if !isWritablePoint(point) {
-			continue
-		}
-		return point, true
-	}
-	return config.PointConfig{}, false
-}
-
-func isWritablePoint(point config.PointConfig) bool {
-	switch point.Protocol {
-	case "modbus-tcp", "modbus-rtu":
-		return point.Function == 1 || point.Function == 3
-	default:
-		return false
-	}
+	_, err := a.runtime.WritePoint(ctx, command.DeviceKey, command.Metric, command.Value)
+	return err
 }
 
 func stringValue(value interface{}) string {
@@ -548,7 +881,7 @@ func mergeRemoteConfig(current config.Config, patchRaw json.RawMessage) (config.
 		return config.Config{}, fmt.Errorf("閰嶇疆蹇呴』鏄?JSON 瀵硅薄")
 	}
 	// Connectivity and local storage settings stay under local control.
-	for _, key := range []string{"gatewayKey", "activation", "mqtt", "web", "networkPorts", "wifi", "offlineCache"} {
+	for _, key := range []string{"gatewayKey", "activation", "mqtt", "web", "networkPorts", "wifi", "offlineCache", "historyStorage"} {
 		delete(patch, key)
 	}
 	preserveRemoteSecrets(base, patch)

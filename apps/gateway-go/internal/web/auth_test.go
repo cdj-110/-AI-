@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,6 +35,52 @@ func TestStatusIsPublic(t *testing.T) {
 	server.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/status", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status response = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestPointStatusReturnsLatestInternalValue(t *testing.T) {
+	cfg := config.Config{GatewayKey: "test-gateway", Points: []config.PointConfig{{DeviceKey: "d1", Metric: "p1"}}}
+	cfg.ApplyDefaults()
+	store := state.New(cfg)
+	store.SetPointValue("d1", "p1", 42.5)
+	server := New(configForAuthTest(), store, nil, "", nil)
+
+	response := httptest.NewRecorder()
+	server.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/point-status", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("point status response = %d, want %d", response.Code, http.StatusOK)
+	}
+	var points []state.PointStatus
+	if err := json.NewDecoder(response.Body).Decode(&points); err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 1 || points[0].Value != 42.5 {
+		t.Fatalf("point status = %#v", points)
+	}
+}
+
+func TestPointStatusFiltersCurrentDevice(t *testing.T) {
+	cfg := config.Config{GatewayKey: "test-gateway", Points: []config.PointConfig{
+		{DeviceKey: "d1", Metric: "p1"},
+		{DeviceKey: "d2", Metric: "p2"},
+	}}
+	cfg.ApplyDefaults()
+	store := state.New(cfg)
+	store.SetPointValue("d1", "p1", 1)
+	store.SetPointValue("d2", "p2", 2)
+	server := New(configForAuthTest(), store, nil, "", nil)
+
+	response := httptest.NewRecorder()
+	server.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/point-status?deviceKey=d2", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("point status response = %d, want %d", response.Code, http.StatusOK)
+	}
+	var points []state.PointStatus
+	if err := json.NewDecoder(response.Body).Decode(&points); err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 1 || points[0].DeviceKey != "d2" || points[0].Value != float64(2) {
+		t.Fatalf("filtered point status = %#v", points)
 	}
 }
 

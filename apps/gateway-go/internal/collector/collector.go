@@ -2,11 +2,17 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 	"weikong-iot-platform/apps/gateway-go/internal/model"
 )
+
+// ErrCollectionDeferred means collection did not reach the device because a
+// higher-priority operation (normally a control write) occupied the connection.
+// Callers should retain the previous value instead of reporting a link fault.
+var ErrCollectionDeferred = errors.New("collection deferred by a higher-priority operation")
 
 type Collector interface {
 	ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error)

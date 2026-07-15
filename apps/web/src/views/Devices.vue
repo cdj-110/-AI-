@@ -247,7 +247,11 @@ function setPickedCoordinate(longitude: number, latitude: number) {
 }
 
 function formatMetrics(metrics: Record<string, unknown>) {
-  return Object.entries(metrics).map(([key, value]) => `${key}: ${String(value)}`).join(' · ');
+  return Object.entries(metrics)
+    .filter(([key]) => key.trim())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join(' · ');
 }
 
 function statusType(status: string) {

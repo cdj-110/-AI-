@@ -23,6 +23,9 @@ type Store struct {
 	points         map[string]PointStatus
 	pointOrder     []string
 	errors         []Event
+	pointRevision  uint64
+	statusRevision uint64
+	subscribers    map[chan struct{}]struct{}
 }
 
 type PointStatus struct {
@@ -71,9 +74,10 @@ type Snapshot struct {
 }
 
 func New(cfg config.Config) *Store {
-	points := make(map[string]PointStatus, len(cfg.Points))
-	pointOrder := make([]string, 0, len(cfg.Points))
-	for _, point := range cfg.Points {
+	statusPoints := cfg.StatusPoints()
+	points := make(map[string]PointStatus, len(statusPoints))
+	pointOrder := make([]string, 0, len(statusPoints))
+	for _, point := range statusPoints {
 		key := pointKey(point.DeviceKey, point.Metric)
 		points[key] = PointStatus{
 			DeviceKey: point.DeviceKey,
@@ -95,13 +99,18 @@ func New(cfg config.Config) *Store {
 		mqttChannels:   mqttChannelsForConfig(cfg),
 		points:         points,
 		pointOrder:     pointOrder,
+		subscribers:    map[chan struct{}]struct{}{},
 	}
 }
 
 func (s *Store) SetMQTTConnected(connected bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.mqttConnected == connected {
+		return
+	}
 	s.mqttConnected = connected
+	s.notifyLocked(false, true)
 }
 
 func (s *Store) ResetMQTTChannels(cfg config.Config) {
@@ -124,6 +133,7 @@ func (s *Store) ResetMQTTChannels(cfg config.Config) {
 			break
 		}
 	}
+	s.notifyLocked(false, true)
 }
 
 func (s *Store) SetMQTTChannelConnected(name string, connected bool) {
@@ -142,6 +152,7 @@ func (s *Store) SetMQTTChannelConnected(name string, connected bool) {
 			break
 		}
 	}
+	s.notifyLocked(false, true)
 }
 
 func (s *Store) ReplaceConfig(cfg config.Config) {
@@ -150,9 +161,10 @@ func (s *Store) ReplaceConfig(cfg config.Config) {
 	s.gatewayKey = cfg.GatewayKey
 	s.collectSeconds = collectSecondsForConfig(cfg)
 	s.mqttEnabled = cfg.ManualMQTTEnabled() || cfg.Activation.IsEnabled()
-	next := make(map[string]PointStatus, len(cfg.Points))
-	pointOrder := make([]string, 0, len(cfg.Points))
-	for _, point := range cfg.Points {
+	statusPoints := cfg.StatusPoints()
+	next := make(map[string]PointStatus, len(statusPoints))
+	pointOrder := make([]string, 0, len(statusPoints))
+	for _, point := range statusPoints {
 		key := pointKey(point.DeviceKey, point.Metric)
 		status := s.points[key]
 		status.DeviceKey = point.DeviceKey
@@ -167,6 +179,7 @@ func (s *Store) ReplaceConfig(cfg config.Config) {
 	}
 	s.points = next
 	s.pointOrder = pointOrder
+	s.notifyLocked(true, true)
 }
 
 func collectSecondsForConfig(cfg config.Config) int {
@@ -182,6 +195,7 @@ func (s *Store) MarkCollect() {
 	defer s.mu.Unlock()
 	now := time.Now()
 	s.lastCollectAt = now
+	s.notifyLocked(false, true)
 }
 
 func (s *Store) MarkPublish() {
@@ -189,6 +203,7 @@ func (s *Store) MarkPublish() {
 	defer s.mu.Unlock()
 	now := time.Now()
 	s.lastPublishAt = now
+	s.notifyLocked(false, true)
 }
 
 func (s *Store) SetPointValue(deviceKey string, metric string, value interface{}) {
@@ -196,6 +211,7 @@ func (s *Store) SetPointValue(deviceKey string, metric string, value interface{}
 	defer s.mu.Unlock()
 	now := time.Now()
 	point := s.points[pointKey(deviceKey, metric)]
+	hadError := point.Error != ""
 	point.DeviceKey = deviceKey
 	point.Metric = metric
 	point.Value = value
@@ -203,6 +219,23 @@ func (s *Store) SetPointValue(deviceKey string, metric string, value interface{}
 	point.Error = ""
 	point.ErrorAt = nil
 	s.points[pointKey(deviceKey, metric)] = point
+	s.notifyLocked(true, hadError)
+}
+
+func (s *Store) ResetPoint(deviceKey string, metric string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := pointKey(deviceKey, metric)
+	point, ok := s.points[key]
+	if !ok {
+		return
+	}
+	point.Value = nil
+	point.UpdatedAt = nil
+	point.Error = ""
+	point.ErrorAt = nil
+	s.points[key] = point
+	s.notifyLocked(true, true)
 }
 
 func (s *Store) SetPointError(point config.PointConfig, err error) {
@@ -211,6 +244,10 @@ func (s *Store) SetPointError(point config.PointConfig, err error) {
 	now := time.Now()
 	key := pointKey(point.DeviceKey, point.Metric)
 	status := s.points[key]
+	message := err.Error()
+	if status.Error == message {
+		return
+	}
 	status.DeviceKey = point.DeviceKey
 	status.Name = point.Name
 	status.Metric = point.Metric
@@ -218,29 +255,70 @@ func (s *Store) SetPointError(point config.PointConfig, err error) {
 	status.Address = point.Address
 	status.Unit = point.Unit
 	status.Decimals = point.Decimals
-	status.Error = err.Error()
+	status.Error = message
 	status.ErrorAt = &now
 	s.points[key] = status
-	s.appendErrorLocked(Event{Time: now, Level: "ERROR", Message: point.DeviceKey + "/" + point.Metric + ": " + err.Error()})
+	s.appendErrorLocked(Event{Time: now, Level: "ERROR", Message: point.DeviceKey + "/" + point.Metric + ": " + message})
+	s.notifyLocked(true, true)
 }
 
 func (s *Store) AddError(message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.appendErrorLocked(Event{Time: time.Now(), Level: "ERROR", Message: message})
+	s.notifyLocked(false, true)
+}
+
+// Subscribe returns a coalesced change signal. Consumers compare revisions and
+// read the latest snapshot, so a slow browser cannot block data collection.
+func (s *Store) Subscribe() (<-chan struct{}, func()) {
+	updates := make(chan struct{}, 1)
+	s.mu.Lock()
+	if s.subscribers == nil {
+		s.subscribers = map[chan struct{}]struct{}{}
+	}
+	s.subscribers[updates] = struct{}{}
+	s.mu.Unlock()
+	return updates, func() {
+		s.mu.Lock()
+		if _, ok := s.subscribers[updates]; ok {
+			delete(s.subscribers, updates)
+			close(updates)
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (s *Store) Revisions() (point uint64, status uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pointRevision, s.statusRevision
+}
+
+func (s *Store) notifyLocked(points bool, status bool) {
+	if points {
+		s.pointRevision++
+	}
+	if status {
+		s.statusRevision++
+	}
+	if !points && !status {
+		return
+	}
+	for subscriber := range s.subscribers {
+		select {
+		case subscriber <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (s *Store) Snapshot() Snapshot {
 	s.mu.RLock()
-	points := make([]PointStatus, 0, len(s.points))
+	points := s.pointStatusesLocked()
 	healthy := 0
 	errorCount := 0
-	for _, key := range s.pointOrder {
-		point, ok := s.points[key]
-		if !ok {
-			continue
-		}
-		points = append(points, point)
+	for _, point := range points {
 		if point.Error == "" {
 			healthy++
 		} else {
@@ -274,6 +352,26 @@ func (s *Store) Snapshot() Snapshot {
 	s.mu.RUnlock()
 	snapshot.SystemMetrics = hardware.ReadSystemMetrics()
 	return snapshot
+}
+
+// PointStatuses returns a lightweight point-only snapshot for protocol
+// forwarding and other high-frequency consumers. Unlike Snapshot it does not
+// read CPU, memory, storage, or network hardware metrics.
+func (s *Store) PointStatuses() []PointStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pointStatusesLocked()
+}
+
+func (s *Store) pointStatusesLocked() []PointStatus {
+	points := make([]PointStatus, 0, len(s.points))
+	for _, key := range s.pointOrder {
+		point, ok := s.points[key]
+		if ok {
+			points = append(points, point)
+		}
+	}
+	return points
 }
 
 func mqttChannelsForConfig(cfg config.Config) map[string]MQTTChannelStatus {

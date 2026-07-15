@@ -3,6 +3,7 @@ package cloud
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -10,6 +11,9 @@ import (
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 	"weikong-iot-platform/apps/gateway-go/internal/model"
 )
+
+var attributeTemplateTokenPattern = regexp.MustCompile(`\{attribute(?:\.[^{}\s",:\[\]]+){0,2}\}`)
+var exactAttributePointTemplatePattern = regexp.MustCompile(`^\{attribute\.[^{}\s",:\[\]]+\.([^{}\s",:\[\]]+)\}$`)
 
 type Client struct {
 	name            string
@@ -255,6 +259,10 @@ func (c *Client) PublishTelemetry(reading model.Reading) error {
 	return c.publish(fmt.Sprintf("weikong/gateways/%s/children/%s/telemetry", c.gatewayKey, reading.DeviceKey), payload)
 }
 
+func (c *Client) PublishTopology(topology interface{}) error {
+	return c.publish(fmt.Sprintf("weikong/gateways/%s/topology/reported", c.gatewayKey), topology)
+}
+
 func (c *Client) PublishAttributes(metrics map[string]interface{}) error {
 	payload, err := c.RenderManualPayload(metrics, nil)
 	if err != nil {
@@ -308,6 +316,7 @@ func (c *Client) RenderManualPayload(metrics map[string]interface{}, grouped map
 	if template == "" {
 		return attributes, nil
 	}
+	template = normalizeAttributePointTemplate(template)
 	rendered := renderPayloadTemplate(template, map[string]interface{}{
 		"gatewayKey": c.gatewayKey,
 		"clientId":   c.clientID,
@@ -323,6 +332,15 @@ func (c *Client) RenderManualPayload(metrics map[string]interface{}, grouped map
 		return nil, fmt.Errorf("parse rendered payload template failed: %w", err)
 	}
 	return payload, nil
+}
+
+func normalizeAttributePointTemplate(template string) string {
+	match := exactAttributePointTemplatePattern.FindStringSubmatch(strings.TrimSpace(template))
+	if len(match) != 2 {
+		return template
+	}
+	key, _ := json.Marshal(match[1])
+	return "{" + string(key) + ":" + match[0] + "}"
 }
 
 func sanitizeMetrics(metrics map[string]interface{}) map[string]interface{} {
@@ -363,6 +381,7 @@ func defaultString(value string, fallback string) string {
 
 func renderPayloadTemplate(template string, values map[string]interface{}) string {
 	rendered := template
+	rendered = replaceAttributeTemplateTokens(rendered, values)
 	for key, value := range values {
 		token := "{" + key + "}"
 		stringToken := "\"" + token + "\""
@@ -374,4 +393,38 @@ func renderPayloadTemplate(template string, values map[string]interface{}) strin
 		rendered = strings.ReplaceAll(rendered, token, string(raw))
 	}
 	return rendered
+}
+
+func replaceAttributeTemplateTokens(template string, values map[string]interface{}) string {
+	rendered := template
+	grouped, _ := values["devices"].(map[string]map[string]interface{})
+	attributes, _ := values["attributes"].(map[string]interface{})
+	tokens := attributeTemplateTokenPattern.FindAllString(template, -1)
+	for _, token := range tokens {
+		value := attributeTemplateValue(token, attributes, grouped)
+		if text, ok := value.(string); ok {
+			quoted, _ := json.Marshal(text)
+			rendered = strings.ReplaceAll(rendered, `"`+token+`"`, string(quoted))
+		}
+		raw, _ := json.Marshal(value)
+		rendered = strings.ReplaceAll(rendered, token, string(raw))
+	}
+	return rendered
+}
+
+func attributeTemplateValue(token string, attributes map[string]interface{}, grouped map[string]map[string]interface{}) interface{} {
+	path := strings.TrimSuffix(strings.TrimPrefix(token, "{attribute"), "}")
+	path = strings.TrimPrefix(path, ".")
+	var value interface{} = attributes
+	if path != "" {
+		parts := strings.Split(path, ".")
+		if len(parts) >= 1 {
+			value = grouped[parts[0]]
+		}
+		if len(parts) >= 2 {
+			deviceValues, _ := value.(map[string]interface{})
+			value = deviceValues[parts[1]]
+		}
+	}
+	return value
 }

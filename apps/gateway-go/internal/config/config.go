@@ -3,35 +3,47 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"weikong-iot-platform/apps/gateway-go/internal/hardware"
 )
 
 type Config struct {
-	GatewayKey             string             `json:"gatewayKey"`
-	CollectIntervalSeconds int                `json:"collectIntervalSeconds"`
-	CacheFile              string             `json:"cacheFile"`
-	OfflineCache           OfflineCacheConfig `json:"offlineCache,omitempty"`
-	Activation             ActivationConfig   `json:"activation,omitempty"`
-	MQTT                   MQTTConfig         `json:"mqtt"`
-	MQTTChannels           []MQTTConfig       `json:"mqttChannels,omitempty"`
-	Resources              []ResourceConfig   `json:"resources,omitempty"`
-	Channels               []ChannelConfig    `json:"channels,omitempty"`
-	SerialPorts            []SerialPort       `json:"serialPorts,omitempty"`
-	NetworkPorts           []NetworkPort      `json:"networkPorts,omitempty"`
-	WiFi                   WiFiConfig         `json:"wifi,omitempty"`
-	Cellular               CellularConfig     `json:"cellular,omitempty"`
-	Devices                []DeviceConfig     `json:"devices,omitempty"`
-	Points                 []PointConfig      `json:"points,omitempty"`
-	ForwardSlave           FeatureConfig      `json:"forwardSlave"`
-	Web                    ListenerConfig     `json:"web"`
-	Security               SecurityConfig     `json:"security,omitempty"`
+	GatewayKey             string                `json:"gatewayKey"`
+	CollectIntervalSeconds int                   `json:"collectIntervalSeconds"`
+	CacheFile              string                `json:"cacheFile"`
+	OfflineCache           OfflineCacheConfig    `json:"offlineCache,omitempty"`
+	HistoryStorage         HistoryStorageConfig  `json:"historyStorage,omitempty"`
+	Activation             ActivationConfig      `json:"activation,omitempty"`
+	MQTT                   MQTTConfig            `json:"mqtt"`
+	MQTTChannels           []MQTTConfig          `json:"mqttChannels,omitempty"`
+	Resources              []ResourceConfig      `json:"resources,omitempty"`
+	Channels               []ChannelConfig       `json:"channels,omitempty"`
+	SerialPorts            []SerialPort          `json:"serialPorts,omitempty"`
+	NetworkPorts           []NetworkPort         `json:"networkPorts,omitempty"`
+	WiFi                   WiFiConfig            `json:"wifi,omitempty"`
+	Cellular               CellularConfig        `json:"cellular,omitempty"`
+	Devices                []DeviceConfig        `json:"devices,omitempty"`
+	Points                 []PointConfig         `json:"points,omitempty"`
+	ForwardDevices         []ForwardDeviceConfig `json:"forwardDevices,omitempty"`
+	EdgeComputing          EdgeComputingConfig   `json:"edgeComputing,omitempty"`
+	ForwardSlave           FeatureConfig         `json:"forwardSlave"`
+	Web                    ListenerConfig        `json:"web"`
+	Security               SecurityConfig        `json:"security,omitempty"`
 }
 
 type OfflineCacheConfig struct {
+	Enabled     bool   `json:"enabled"`
+	MaxSizeMB   int    `json:"maxSizeMB"`
+	StoragePath string `json:"storagePath,omitempty"`
+}
+
+type HistoryStorageConfig struct {
 	Enabled     bool   `json:"enabled"`
 	MaxSizeMB   int    `json:"maxSizeMB"`
 	StoragePath string `json:"storagePath,omitempty"`
@@ -107,6 +119,108 @@ type CellularConfig struct {
 	Interface string `json:"interface,omitempty"`
 }
 
+type EdgeComputingConfig struct {
+	Enabled bool                     `json:"enabled"`
+	Groups  []EdgeComputeGroupConfig `json:"groups,omitempty"`
+}
+
+type EdgeComputeGroupConfig struct {
+	GroupKey         string                    `json:"groupKey"`
+	Name             string                    `json:"name"`
+	Enabled          *bool                     `json:"enabled,omitempty"`
+	HeartbeatSeconds int                       `json:"heartbeatSeconds,omitempty"`
+	Points           []EdgeComputedPointConfig `json:"points,omitempty"`
+}
+
+type EdgeComputedPointConfig struct {
+	Name       string                   `json:"name"`
+	Metric     string                   `json:"metric"`
+	Enabled    *bool                    `json:"enabled,omitempty"`
+	DataType   string                   `json:"dataType"`
+	Unit       string                   `json:"unit,omitempty"`
+	Decimals   int                      `json:"decimals,omitempty"`
+	Expression string                   `json:"expression"`
+	Inputs     []EdgeComputeInputConfig `json:"inputs,omitempty"`
+}
+
+type EdgeComputeInputConfig struct {
+	Alias           string `json:"alias"`
+	SourceDeviceKey string `json:"sourceDeviceKey"`
+	SourceMetric    string `json:"sourceMetric"`
+}
+
+func (g EdgeComputeGroupConfig) IsEnabled() bool  { return g.Enabled == nil || *g.Enabled }
+func (p EdgeComputedPointConfig) IsEnabled() bool { return p.Enabled == nil || *p.Enabled }
+
+func (e *EdgeComputingConfig) ApplyDefaults() {
+	for groupIndex := range e.Groups {
+		group := &e.Groups[groupIndex]
+		if group.GroupKey == "" {
+			group.GroupKey = fmt.Sprintf("edge-group-%03d", groupIndex+1)
+		}
+		if group.Name == "" {
+			group.Name = group.GroupKey
+		}
+		if group.Enabled == nil {
+			enabled := true
+			group.Enabled = &enabled
+		}
+		for pointIndex := range group.Points {
+			point := &group.Points[pointIndex]
+			if point.Metric == "" {
+				point.Metric = fmt.Sprintf("computed_%d", pointIndex+1)
+			}
+			if point.Name == "" {
+				point.Name = point.Metric
+			}
+			if point.Enabled == nil {
+				enabled := true
+				point.Enabled = &enabled
+			}
+			if point.DataType == "" {
+				point.DataType = "float64"
+			}
+		}
+	}
+}
+
+// ComputedStatusPoints exposes enabled derived points to the shared runtime
+// state without adding them to the physical collection list.
+func (c Config) ComputedStatusPoints() []PointConfig {
+	if !c.EdgeComputing.Enabled {
+		return nil
+	}
+	var points []PointConfig
+	for _, group := range c.EdgeComputing.Groups {
+		if !group.IsEnabled() {
+			continue
+		}
+		for _, computed := range group.Points {
+			if !computed.IsEnabled() {
+				continue
+			}
+			points = append(points, PointConfig{
+				DeviceKey: group.GroupKey,
+				Name:      computed.Name,
+				Metric:    computed.Metric,
+				Protocol:  "edge-compute",
+				Address:   group.GroupKey,
+				DataType:  computed.DataType,
+				Quantity:  1,
+				Scale:     1,
+				Unit:      computed.Unit,
+				Decimals:  computed.Decimals,
+			})
+		}
+	}
+	return points
+}
+
+func (c Config) StatusPoints() []PointConfig {
+	points := append([]PointConfig(nil), c.Points...)
+	return append(points, c.ComputedStatusPoints()...)
+}
+
 func (c CellularConfig) IsEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
 }
@@ -125,6 +239,7 @@ type ChannelConfig struct {
 	ResourceKey            string         `json:"resourceKey,omitempty"`
 	Name                   string         `json:"name"`
 	Type                   string         `json:"type"`
+	Role                   string         `json:"role,omitempty"`
 	Protocol               string         `json:"protocol"`
 	ForwardProtocol        string         `json:"forwardProtocol,omitempty"`
 	CollectIntervalSeconds int            `json:"collectIntervalSeconds,omitempty"`
@@ -137,6 +252,7 @@ type ChannelConfig struct {
 }
 
 type IEC104Config struct {
+	Configured                          bool `json:"configured,omitempty"`
 	GeneralInterrogationOnStart         bool `json:"generalInterrogationOnStart"`
 	GeneralInterrogationIntervalSeconds int  `json:"generalInterrogationIntervalSeconds"`
 	ClockSyncOnStart                    bool `json:"clockSyncOnStart"`
@@ -146,61 +262,142 @@ type IEC104Config struct {
 }
 
 type PointConfig struct {
-	DeviceKey              string  `json:"deviceKey"`
-	ChannelKey             string  `json:"channelKey,omitempty"`
-	CollectIntervalSeconds int     `json:"collectIntervalSeconds,omitempty"`
-	Name                   string  `json:"name"`
-	Metric                 string  `json:"metric"`
-	Protocol               string  `json:"protocol"`
-	Address                string  `json:"address"`
-	PointType              string  `json:"pointType,omitempty"`
-	SlaveID                byte    `json:"slaveId"`
-	Area                   string  `json:"area,omitempty"`
-	DBNumber               uint16  `json:"dbNumber,omitempty"`
-	Rack                   uint8   `json:"rack,omitempty"`
-	Slot                   uint8   `json:"slot,omitempty"`
-	LocalTSAP              string  `json:"localTsap,omitempty"`
-	RemoteTSAP             string  `json:"remoteTsap,omitempty"`
-	ObjectRef              string  `json:"objectRef,omitempty"`
-	FC                     string  `json:"fc,omitempty"`
-	NodeID                 string  `json:"nodeId,omitempty"`
-	Username               string  `json:"username,omitempty"`
-	Password               string  `json:"password,omitempty"`
-	BaudRate               int     `json:"baudRate,omitempty"`
-	DataBits               int     `json:"dataBits,omitempty"`
-	StopBits               int     `json:"stopBits,omitempty"`
-	Parity                 string  `json:"parity,omitempty"`
-	Function               uint8   `json:"function"`
-	Register               uint16  `json:"register"`
-	Quantity               uint16  `json:"quantity"`
-	DataType               string  `json:"dataType"`
-	ByteOrder              string  `json:"byteOrder"`
-	WordOrder              string  `json:"wordOrder"`
-	BitIndex               *uint8  `json:"bitIndex"`
-	Scale                  float64 `json:"scale"`
-	Offset                 float64 `json:"offset"`
-	Unit                   string  `json:"unit,omitempty"`
-	Decimals               int     `json:"decimals,omitempty"`
+	DeviceKey              string        `json:"deviceKey"`
+	ChannelKey             string        `json:"channelKey,omitempty"`
+	CollectIntervalSeconds int           `json:"collectIntervalSeconds,omitempty"`
+	Name                   string        `json:"name"`
+	Metric                 string        `json:"metric"`
+	Protocol               string        `json:"protocol"`
+	Address                string        `json:"address"`
+	PointType              string        `json:"pointType,omitempty"`
+	SlaveID                byte          `json:"slaveId"`
+	CommonAddress          uint16        `json:"commonAddress,omitempty"`
+	IOA                    uint32        `json:"ioa,omitempty"`
+	IEC104                 *IEC104Config `json:"iec104,omitempty"`
+	Area                   string        `json:"area,omitempty"`
+	DBNumber               uint16        `json:"dbNumber,omitempty"`
+	Rack                   uint8         `json:"rack,omitempty"`
+	Slot                   uint8         `json:"slot,omitempty"`
+	LocalTSAP              string        `json:"localTsap,omitempty"`
+	RemoteTSAP             string        `json:"remoteTsap,omitempty"`
+	ObjectRef              string        `json:"objectRef,omitempty"`
+	FC                     string        `json:"fc,omitempty"`
+	NodeID                 string        `json:"nodeId,omitempty"`
+	Username               string        `json:"username,omitempty"`
+	Password               string        `json:"password,omitempty"`
+	BaudRate               int           `json:"baudRate,omitempty"`
+	DataBits               int           `json:"dataBits,omitempty"`
+	StopBits               int           `json:"stopBits,omitempty"`
+	Parity                 string        `json:"parity,omitempty"`
+	Function               uint8         `json:"function"`
+	Register               uint16        `json:"register"`
+	Quantity               uint16        `json:"quantity"`
+	DataType               string        `json:"dataType"`
+	ByteOrder              string        `json:"byteOrder"`
+	WordOrder              string        `json:"wordOrder"`
+	BitIndex               *uint8        `json:"bitIndex"`
+	Scale                  float64       `json:"scale"`
+	Offset                 float64       `json:"offset"`
+	Unit                   string        `json:"unit,omitempty"`
+	Decimals               int           `json:"decimals,omitempty"`
 }
 
 type DeviceConfig struct {
-	DeviceKey     string        `json:"deviceKey"`
-	ChannelKey    string        `json:"channelKey,omitempty"`
-	Name          string        `json:"name"`
-	PLCModel      string        `json:"plcModel,omitempty"`
-	InterfaceType string        `json:"interfaceType,omitempty"`
-	InterfaceName string        `json:"interfaceName,omitempty"`
-	Protocol      string        `json:"protocol"`
-	Address       string        `json:"address"`
-	SlaveID       byte          `json:"slaveId"`
-	Rack          uint8         `json:"rack,omitempty"`
-	Slot          uint8         `json:"slot,omitempty"`
-	LocalTSAP     string        `json:"localTsap,omitempty"`
-	RemoteTSAP    string        `json:"remoteTsap,omitempty"`
-	IEDName       string        `json:"iedName,omitempty"`
-	Username      string        `json:"username,omitempty"`
-	Password      string        `json:"password,omitempty"`
-	Points        []PointConfig `json:"points"`
+	DeviceKey                string        `json:"deviceKey"`
+	ChannelKey               string        `json:"channelKey,omitempty"`
+	Name                     string        `json:"name"`
+	PLCModel                 string        `json:"plcModel,omitempty"`
+	InterfaceType            string        `json:"interfaceType,omitempty"`
+	InterfaceName            string        `json:"interfaceName,omitempty"`
+	Protocol                 string        `json:"protocol"`
+	Address                  string        `json:"address"`
+	SlaveID                  byte          `json:"slaveId"`
+	CommonAddress            uint16        `json:"commonAddress,omitempty"`
+	ReconnectIntervalSeconds int           `json:"reconnectIntervalSeconds"`
+	Rack                     uint8         `json:"rack,omitempty"`
+	Slot                     uint8         `json:"slot,omitempty"`
+	LocalTSAP                string        `json:"localTsap,omitempty"`
+	RemoteTSAP               string        `json:"remoteTsap,omitempty"`
+	IEDName                  string        `json:"iedName,omitempty"`
+	Username                 string        `json:"username,omitempty"`
+	Password                 string        `json:"password,omitempty"`
+	Points                   []PointConfig `json:"points"`
+}
+
+// ForwardDeviceConfig describes a logical downstream device exposed by a
+// forwarding server. Its points reference collected points instead of being
+// collected independently.
+type ForwardDeviceConfig struct {
+	DeviceKey     string               `json:"deviceKey"`
+	ChannelKey    string               `json:"channelKey,omitempty"`
+	Name          string               `json:"name"`
+	Protocol      string               `json:"protocol"`
+	Enabled       *bool                `json:"enabled,omitempty"`
+	UnitID        byte                 `json:"unitId,omitempty"`
+	CommonAddress uint16               `json:"commonAddress,omitempty"`
+	Points        []ForwardPointConfig `json:"points,omitempty"`
+}
+
+type ForwardPointConfig struct {
+	Name            string  `json:"name"`
+	Metric          string  `json:"metric"`
+	SourceDeviceKey string  `json:"sourceDeviceKey"`
+	SourceMetric    string  `json:"sourceMetric"`
+	PointType       string  `json:"pointType,omitempty"`
+	Function        uint8   `json:"function,omitempty"`
+	Register        uint16  `json:"register,omitempty"`
+	IOA             uint32  `json:"ioa,omitempty"`
+	Quantity        uint16  `json:"quantity,omitempty"`
+	DataType        string  `json:"dataType,omitempty"`
+	ByteOrder       string  `json:"byteOrder,omitempty"`
+	WordOrder       string  `json:"wordOrder,omitempty"`
+	Scale           float64 `json:"scale,omitempty"`
+	Offset          float64 `json:"offset,omitempty"`
+	Unit            string  `json:"unit,omitempty"`
+	Decimals        int     `json:"decimals,omitempty"`
+}
+
+func (d ForwardDeviceConfig) IsEnabled() bool {
+	return d.Enabled == nil || *d.Enabled
+}
+
+func (d *ForwardDeviceConfig) ApplyDefaults(index int) {
+	if d.DeviceKey == "" {
+		d.DeviceKey = fmt.Sprintf("forward-device-%03d", index+1)
+	}
+	if d.Name == "" {
+		d.Name = d.DeviceKey
+	}
+	if d.UnitID == 0 {
+		d.UnitID = 1
+	}
+	if d.CommonAddress == 0 {
+		d.CommonAddress = 1
+	}
+	for pointIndex := range d.Points {
+		point := &d.Points[pointIndex]
+		if point.Name == "" {
+			point.Name = point.SourceMetric
+		}
+		if point.Metric == "" {
+			point.Metric = point.SourceMetric
+		}
+		if point.DataType == "" {
+			point.DataType = "uint16"
+		}
+		if point.Quantity == 0 {
+			point.Quantity = defaultQuantity(point.DataType)
+		}
+		if point.Scale == 0 {
+			point.Scale = 1
+		}
+		if point.Function == 0 && d.Protocol == "modbus-tcp-slave" {
+			point.Function = 3
+		}
+		if point.IOA == 0 {
+			point.IOA = uint32(point.Register)
+		}
+	}
 }
 
 type FeatureConfig struct {
@@ -261,6 +458,12 @@ func Parse(raw []byte) (Config, error) {
 		return Config{}, fmt.Errorf("gatewayKey is required")
 	}
 	cfg.ApplyDefaults()
+	if err := validateForwardListenAddress("Modbus TCP", cfg.ForwardSlave.ModbusListen); err != nil {
+		return Config{}, err
+	}
+	if err := validateForwardListenAddress("IEC104", cfg.ForwardSlave.IEC104Listen); err != nil {
+		return Config{}, err
+	}
 	if cfg.OfflineCache.Enabled && (cfg.OfflineCache.MaxSizeMB < 12 || cfg.OfflineCache.MaxSizeMB > 16) {
 		return Config{}, fmt.Errorf("offline cache maxSizeMB must be between 12 and 16")
 	}
@@ -269,7 +472,131 @@ func Parse(raw []byte) (Config, error) {
 			return Config{}, fmt.Errorf("mqtt broker/clientId/username are required")
 		}
 	}
+	for _, point := range cfg.Points {
+		if point.Protocol == "iec104" && (point.IOA == 0 || point.IOA > 0xFFFFFF) {
+			return Config{}, fmt.Errorf("IEC104 point %s IOA must be between 1 and 16777215", point.Metric)
+		}
+	}
 	return cfg, nil
+}
+
+// ValidateNewGlobalIdentifierDuplicates allows duplicate identifiers already
+// present in a legacy project, while preventing a save from introducing or
+// increasing a collision. This keeps old forwarding references stable.
+func (c Config) ValidateNewGlobalIdentifierDuplicates(previous Config) error {
+	currentCounts := c.globalDeviceKeyCounts()
+	previousCounts := previous.globalDeviceKeyCounts()
+	for key, count := range currentCounts {
+		if key == "" {
+			return fmt.Errorf("设备标识不能为空")
+		}
+		if count > 1 && count > previousCounts[key] {
+			return fmt.Errorf("设备标识 %s 重复，请使用全局唯一标识", key)
+		}
+	}
+	currentMetrics := c.globalPointMetricCounts()
+	previousMetrics := previous.globalPointMetricCounts()
+	for metric, count := range currentMetrics {
+		if metric == "" {
+			if count > previousMetrics[metric] {
+				return fmt.Errorf("点位标识符不能为空")
+			}
+			continue
+		}
+		if count > 1 && count > previousMetrics[metric] {
+			return fmt.Errorf("点位标识符 %s 重复，请使用全局唯一标识符", metric)
+		}
+	}
+	return nil
+}
+
+func (c Config) globalDeviceKeyCounts() map[string]int {
+	counts := map[string]int{}
+	add := func(value string) { counts[strings.ToLower(strings.TrimSpace(value))]++ }
+	for _, device := range c.Devices {
+		add(device.DeviceKey)
+	}
+	for _, device := range c.ForwardDevices {
+		add(device.DeviceKey)
+	}
+	for _, group := range c.EdgeComputing.Groups {
+		add(group.GroupKey)
+	}
+	return counts
+}
+
+func (c Config) globalPointMetricCounts() map[string]int {
+	counts := map[string]int{}
+	add := func(value string) { counts[strings.ToLower(strings.TrimSpace(value))]++ }
+	if len(c.Devices) > 0 {
+		for _, device := range c.Devices {
+			for _, point := range device.Points {
+				add(point.Metric)
+			}
+		}
+	} else {
+		for _, point := range c.Points {
+			add(point.Metric)
+		}
+	}
+	for _, device := range c.ForwardDevices {
+		for _, point := range device.Points {
+			add(point.Metric)
+		}
+	}
+	for _, group := range c.EdgeComputing.Groups {
+		for _, point := range group.Points {
+			add(point.Metric)
+		}
+	}
+	return counts
+}
+
+// ValidateGlobalDeviceKeys keeps the identifier namespace shared by collected
+// devices, forwarding devices, and edge-compute virtual devices. Comparisons
+// are case-insensitive so identifiers remain unambiguous in APIs and trees.
+func (c Config) ValidateGlobalDeviceKeys() error {
+	seen := map[string]string{}
+	add := func(deviceKey, owner string) error {
+		deviceKey = strings.TrimSpace(deviceKey)
+		if deviceKey == "" {
+			return fmt.Errorf("%s 的设备标识不能为空", owner)
+		}
+		normalized := strings.ToLower(deviceKey)
+		if previous, exists := seen[normalized]; exists {
+			return fmt.Errorf("设备标识 %s 重复：%s 与 %s 使用了同一标识", deviceKey, previous, owner)
+		}
+		seen[normalized] = owner
+		return nil
+	}
+	for index, device := range c.Devices {
+		if err := add(device.DeviceKey, fmt.Sprintf("采集设备 %d", index+1)); err != nil {
+			return err
+		}
+	}
+	for index, device := range c.ForwardDevices {
+		if err := add(device.DeviceKey, fmt.Sprintf("转发设备 %d", index+1)); err != nil {
+			return err
+		}
+	}
+	for index, group := range c.EdgeComputing.Groups {
+		if err := add(group.GroupKey, fmt.Sprintf("边缘计算组 %d", index+1)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateForwardListenAddress(protocol, address string) error {
+	_, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("%s forward listen address %q is invalid: %w", protocol, address, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("%s forward listen port must be between 1 and 65535", protocol)
+	}
+	return nil
 }
 
 func (c *Config) ApplyActivation() error {
@@ -388,6 +715,9 @@ func (c *Config) ApplyDefaults() {
 	if c.OfflineCache.MaxSizeMB == 0 {
 		c.OfflineCache.MaxSizeMB = 16
 	}
+	if c.HistoryStorage.MaxSizeMB == 0 {
+		c.HistoryStorage.MaxSizeMB = 256
+	}
 	c.ForwardSlave.ApplyDefaults()
 	c.MQTT.ApplyDefaults()
 	for i := range c.MQTTChannels {
@@ -416,6 +746,10 @@ func (c *Config) ApplyDefaults() {
 	c.ApplyResourceDefaults()
 	c.ApplyChannelDefaults()
 	c.ApplyForwardDefaults()
+	c.EdgeComputing.ApplyDefaults()
+	for i := range c.ForwardDevices {
+		c.ForwardDevices[i].ApplyDefaults(i)
+	}
 	if len(c.Devices) > 0 {
 		hadDevices = true
 	}
@@ -533,7 +867,25 @@ func (c *Config) ApplyChannelDefaults() {
 		if channel.Name == "" {
 			channel.Name = channel.ChannelKey
 		}
-		if channel.Protocol == "" {
+		if channel.Role == "" {
+			channel.Role = "collect"
+			hasCollectionDevice := false
+			for _, device := range c.Devices {
+				if device.ChannelKey == channel.ChannelKey {
+					hasCollectionDevice = true
+					break
+				}
+			}
+			if !hasCollectionDevice && channel.ForwardProtocol != "" && channel.ForwardProtocol != "none" {
+				channel.Role = "forward"
+			}
+		}
+		if channel.Role == "forward" {
+			channel.Protocol = "none"
+			if channel.ForwardProtocol == "" || channel.ForwardProtocol == "none" {
+				channel.ForwardProtocol = "modbus-tcp-slave"
+			}
+		} else if channel.Protocol == "" || channel.Protocol == "none" {
 			channel.Protocol = "modbus-tcp"
 		}
 		if channel.ForwardProtocol == "" {
@@ -656,10 +1008,15 @@ func (c *Config) remapDevicesForRenamedChannel(oldKey string, newKey string, pro
 			device.Points[pointIndex].ChannelKey = newKey
 		}
 	}
+	for i := range c.ForwardDevices {
+		if c.ForwardDevices[i].ChannelKey == oldKey {
+			c.ForwardDevices[i].ChannelKey = newKey
+		}
+	}
 }
 
 func (i *IEC104Config) ApplyDefaults() {
-	if !i.GeneralInterrogationOnStart && i.GeneralInterrogationIntervalSeconds == 0 && !i.ClockSyncOnStart && i.ClockSyncIntervalSeconds == 0 && !i.CounterInterrogationOnStart && i.CounterInterrogationIntervalSeconds == 0 {
+	if !i.Configured && !i.GeneralInterrogationOnStart && i.GeneralInterrogationIntervalSeconds == 0 && !i.ClockSyncOnStart && i.ClockSyncIntervalSeconds == 0 && !i.CounterInterrogationOnStart && i.CounterInterrogationIntervalSeconds == 0 {
 		i.GeneralInterrogationOnStart = true
 		i.ClockSyncOnStart = true
 		i.ClockSyncIntervalSeconds = 3600
@@ -679,6 +1036,12 @@ func (i *IEC104Config) ApplyDefaults() {
 
 func (c *Config) ApplyForwardDefaults() {
 	c.ForwardSlave.ApplyDefaults()
+	for _, device := range c.ForwardDevices {
+		if device.IsEnabled() && device.Protocol != "" && device.Protocol != "none" {
+			c.ForwardSlave.Enabled = true
+			return
+		}
+	}
 	for _, channel := range c.Channels {
 		if channel.ForwardProtocol != "" && channel.ForwardProtocol != "none" {
 			c.ForwardSlave.Enabled = true
@@ -1027,6 +1390,12 @@ func (d *DeviceConfig) ApplyDefaults() {
 	if d.SlaveID == 0 {
 		d.SlaveID = 1
 	}
+	if d.ReconnectIntervalSeconds <= 0 {
+		d.ReconnectIntervalSeconds = 30
+	}
+	if d.Protocol == "iec104" && d.CommonAddress == 0 {
+		d.CommonAddress = uint16(d.SlaveID)
+	}
 	for i := range d.Points {
 		applyDeviceConnection(&d.Points[i], *d)
 		d.Points[i].ApplyDefaults()
@@ -1039,6 +1408,12 @@ func applyDeviceConnection(point *PointConfig, device DeviceConfig) {
 	point.Protocol = device.Protocol
 	point.Address = device.Address
 	point.SlaveID = device.SlaveID
+	if device.Protocol == "iec104" {
+		point.CommonAddress = device.CommonAddress
+		if point.CommonAddress == 0 {
+			point.CommonAddress = uint16(device.SlaveID)
+		}
+	}
 	point.Rack = device.Rack
 	point.Slot = device.Slot
 	point.LocalTSAP = device.LocalTSAP
@@ -1068,6 +1443,11 @@ func applyChannelPointDefaults(point *PointConfig, channel ChannelConfig) {
 	if channel.CollectIntervalSeconds > 0 {
 		point.CollectIntervalSeconds = channel.CollectIntervalSeconds
 	}
+	if channel.Protocol == "iec104" {
+		options := channel.IEC104
+		options.ApplyDefaults()
+		point.IEC104 = &options
+	}
 }
 
 func applySerialConnection(point *PointConfig, serialPort SerialPort) {
@@ -1079,6 +1459,20 @@ func applySerialConnection(point *PointConfig, serialPort SerialPort) {
 }
 
 func (p *PointConfig) ApplyDefaults() {
+	if p.Protocol == "iec104" {
+		if p.CommonAddress == 0 {
+			p.CommonAddress = uint16(p.SlaveID)
+		}
+		if p.CommonAddress == 0 {
+			p.CommonAddress = 1
+		}
+		if p.IOA == 0 && p.Register != 0 {
+			p.IOA = uint32(p.Register)
+		}
+		if p.IEC104 != nil {
+			p.IEC104.ApplyDefaults()
+		}
+	}
 	if p.Protocol == "modbus-rtu" {
 		if p.BaudRate == 0 {
 			p.BaudRate = 9600
@@ -1145,14 +1539,19 @@ func devicesFromFlatPoints(points []PointConfig) []DeviceConfig {
 	indexes := map[string]int{}
 	var devices []DeviceConfig
 	for _, point := range points {
-		key := point.DeviceKey + "::" + point.Protocol + "::" + point.Address + "::" + fmt.Sprint(point.SlaveID)
+		stationAddress := fmt.Sprint(point.SlaveID)
+		if point.Protocol == "iec104" {
+			stationAddress = fmt.Sprint(point.CommonAddress)
+		}
+		key := point.DeviceKey + "::" + point.Protocol + "::" + point.Address + "::" + stationAddress
 		index, ok := indexes[key]
 		if !ok {
 			devices = append(devices, DeviceConfig{
-				DeviceKey: point.DeviceKey,
-				Protocol:  point.Protocol,
-				Address:   point.Address,
-				SlaveID:   point.SlaveID,
+				DeviceKey:     point.DeviceKey,
+				Protocol:      point.Protocol,
+				Address:       point.Address,
+				SlaveID:       point.SlaveID,
+				CommonAddress: point.CommonAddress,
 			})
 			index = len(devices) - 1
 			indexes[key] = index

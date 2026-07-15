@@ -35,7 +35,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := app.New(cfg, *configPath).Run(ctx); err != nil {
+	application, err := app.New(cfg, *configPath)
+	if err != nil {
+		log.Fatalf("initialize gateway failed: %v", err)
+	}
+	if err := application.Run(ctx); err != nil {
 		log.Fatalf("gateway stopped: %v", err)
 	}
 }

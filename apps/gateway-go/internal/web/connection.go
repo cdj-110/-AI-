@@ -15,15 +15,16 @@ import (
 )
 
 type connectionTestRequest struct {
-	Protocol   string `json:"protocol"`
-	Address    string `json:"address"`
-	SlaveID    byte   `json:"slaveId"`
-	Rack       uint8  `json:"rack"`
-	Slot       uint8  `json:"slot"`
-	LocalTSAP  string `json:"localTsap"`
-	RemoteTSAP string `json:"remoteTsap"`
-	Username   string `json:"username"`
-	Password   string `json:"password"`
+	Protocol      string `json:"protocol"`
+	Address       string `json:"address"`
+	SlaveID       byte   `json:"slaveId"`
+	CommonAddress uint16 `json:"commonAddress"`
+	Rack          uint8  `json:"rack"`
+	Slot          uint8  `json:"slot"`
+	LocalTSAP     string `json:"localTsap"`
+	RemoteTSAP    string `json:"remoteTsap"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
 }
 
 func (s *Server) testConnection(writer http.ResponseWriter, request *http.Request) {
@@ -69,7 +70,11 @@ func (s *Server) testConnection(writer http.ResponseWriter, request *http.Reques
 	}
 
 	if body.Protocol == "iec104" {
-		result, err := collector.TestIEC104Connection(ctx, body.Address, uint16(body.SlaveID))
+		commonAddress := body.CommonAddress
+		if commonAddress == 0 {
+			commonAddress = uint16(body.SlaveID)
+		}
+		result, err := collector.TestIEC104Connection(ctx, body.Address, commonAddress)
 		if err != nil {
 			writer.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(writer).Encode(map[string]interface{}{"ok": false, "address": result.Address, "message": err.Error()})

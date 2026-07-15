@@ -176,6 +176,40 @@ interface RemoteConfigSnapshot {
   devices?: RemoteDeviceConfig[];
 }
 
+interface GatewayTopologyMetric {
+  identifier: string;
+  name?: string;
+  dataType?: string;
+  unit?: string;
+}
+
+interface GatewayTopologyItem {
+  deviceKey: string;
+  name?: string;
+  protocol?: string;
+  address?: string;
+  slaveId?: number;
+  pointCount?: number;
+  metrics?: GatewayTopologyMetric[];
+  status: 'NEW' | 'UPDATE' | 'UNCHANGED' | 'CONFLICT' | 'MISSING_UNREPORTED';
+  conflictReason?: string;
+  currentGatewayKey?: string;
+}
+
+interface GatewayTopologyDraft {
+  id: string;
+  gatewayKey: string;
+  reportedConfigVersion?: string;
+  status: 'PENDING' | 'CONFLICT' | 'CONFIRMED' | 'IGNORED';
+  items: GatewayTopologyItem[];
+  conflicts?: Array<{ deviceKey: string; reason: string }>;
+  reportedAt: string;
+  confirmedAt?: string;
+  confirmedBy?: string;
+  ignoredAt?: string;
+  ignoredBy?: string;
+}
+
 const route = useRoute();
 const router = useRouter();
 const userStore = useUserStore();
@@ -214,6 +248,9 @@ const remoteSnapshot = ref<RemoteConfigSnapshot>();
 const remoteSnapshotAt = ref<string>();
 const remoteSnapshotLoading = ref(false);
 const remoteConfigLoading = ref(false);
+const topologyDraft = ref<GatewayTopologyDraft>();
+const topologyDraftLoading = ref(false);
+const topologyDraftApplying = ref(false);
 const sendingRemoteConfig = ref(false);
 const remoteConfigInitialized = ref(false);
 const remoteConfigConfirmVisible = ref(false);
@@ -268,7 +305,7 @@ const metrics = computed(() => [...latestMetrics.value.values()]
   // 卡片只展示未忽略字段，顺序跟随设备配置中的排序。
   .filter((snapshot) => metricEnabled(snapshot.key))
   .map((snapshot) => ({ key: snapshot.key, value: snapshot.value, time: snapshot.time, deviceKey: snapshot.deviceKey }))
-  .sort((left, right) => metricSortOrder(left.key) - metricSortOrder(right.key)));
+  .sort((left, right) => compareMetricKeys(left.key, right.key)));
 const sortedDeviceMetrics = computed(() => {
   // 配置列表优先展示当前正在上报的字段，方便维护实时点位。
   const latestKeys = new Set(latestMetrics.value.keys());
@@ -292,10 +329,7 @@ const numericMetricKeys = computed(() => {
     }
   }
   return [...keys].sort((left, right) => {
-    const leftOrder = metricSortOrder(left);
-    const rightOrder = metricSortOrder(right);
-    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
-    return left.localeCompare(right);
+    return compareMetricKeys(left, right);
   });
 });
 const selectedMetricValues = computed(() => trendPoints.value.map((point) => point.value).filter((value) => Number.isFinite(value)));
@@ -313,6 +347,11 @@ const selectedMetricStats = computed(() => {
     max: values.length ? formatNumber(Math.max(...values)) : '-',
     avg: values.length ? formatNumber(total / values.length) : '-',
   };
+});
+const topologyDraftCounts = computed(() => {
+  const counts: Record<string, number> = { NEW: 0, UPDATE: 0, UNCHANGED: 0, CONFLICT: 0, MISSING_UNREPORTED: 0 };
+  for (const item of topologyDraft.value?.items ?? []) counts[item.status] = (counts[item.status] ?? 0) + 1;
+  return counts;
 });
 const latestTelemetryTime = computed(() => latest.value?.time ?? device.value?.lastSeenAt);
 const telemetryState = computed(() => {
@@ -345,6 +384,27 @@ function metricSortOrder(key: string) {
   return deviceMetrics.value.find((metric) => metric.identifier === key)?.sortOrder ?? 999;
 }
 
+function metricOrderIndex(key: string) {
+  const index = deviceMetrics.value.findIndex((metric) => metric.identifier === key);
+  return index >= 0 ? index : Number.MAX_SAFE_INTEGER;
+}
+
+function compareMetricKeys(left: string, right: string) {
+  const leftOrder = metricSortOrder(left);
+  const rightOrder = metricSortOrder(right);
+  if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+  const leftIndex = metricOrderIndex(left);
+  const rightIndex = metricOrderIndex(right);
+  if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+  return left.localeCompare(right);
+}
+
+function orderedMetricEntries(metrics: Record<string, unknown>) {
+  return Object.entries(metrics)
+    .filter(([key]) => key.trim() && metricEnabled(key))
+    .sort(([left], [right]) => compareMetricKeys(left, right));
+}
+
 function deviceTypeLabel(type?: string) {
   return { GATEWAY: '网关', GATEWAY_CHILD: '网关子设备', DIRECT: '直连设备' }[type ?? ''] ?? type ?? '-';
 }
@@ -355,6 +415,34 @@ function statusType(status?: string) {
 
 function statusLabel(status?: string) {
   return { ONLINE: '在线', OFFLINE: '离线', DISABLED: '停用' }[status ?? ''] ?? status ?? '-';
+}
+
+function topologyStatusLabel(status?: string) {
+  return { PENDING: '待确认', CONFLICT: '有冲突', CONFIRMED: '已确认', IGNORED: '已忽略' }[status ?? ''] ?? status ?? '-';
+}
+
+function topologyStatusType(status?: string) {
+  if (status === 'CONFIRMED') return 'success';
+  if (status === 'CONFLICT') return 'danger';
+  if (status === 'IGNORED') return 'info';
+  return 'warning';
+}
+
+function topologyItemStatusLabel(status?: string) {
+  return {
+    NEW: '新增',
+    UPDATE: '更新',
+    UNCHANGED: '无变化',
+    CONFLICT: '冲突',
+    MISSING_UNREPORTED: '网关未上报',
+  }[status ?? ''] ?? status ?? '-';
+}
+
+function topologyItemStatusType(status?: string) {
+  if (status === 'NEW') return 'success';
+  if (status === 'UPDATE') return 'warning';
+  if (status === 'CONFLICT') return 'danger';
+  return 'info';
 }
 
 function childHeartbeatTopic(childKey: string) {
@@ -418,7 +506,11 @@ function flushTelemetryEvents() {
 function sanitizeTelemetryEvent(event: TelemetryEvent): TelemetryEvent {
   return {
     ...event,
-    metrics: Object.fromEntries(Object.entries(event.metrics ?? {}).filter(([key]) => key.trim().length > 0)),
+    metrics: Object.fromEntries(
+      Object.entries(event.metrics ?? {})
+        .filter(([key]) => key.trim().length > 0)
+        .sort(([left], [right]) => compareMetricKeys(left, right)),
+    ),
   };
 }
 
@@ -454,7 +546,7 @@ function handleDeviceStatusEvent(event: Event) {
 
 async function refreshPage() {
   const id = String(route.params.id);
-  await Promise.all([loadPage(id), loadSettings(id), loadCredentials(id)]);
+  await Promise.all([loadPage(id), loadSettings(id), loadCredentials(id), loadTopologyDraft(id, true)]);
 }
 
 async function loadCredentials(id = String(route.params.id)) {
@@ -511,6 +603,48 @@ async function loadCurrentRemoteConfig(id = String(route.params.id), silentError
     remoteDevices.value = JSON.parse(JSON.stringify(data.config.devices ?? [])) as RemoteDeviceConfig[];
   } finally {
     remoteSnapshotLoading.value = false;
+  }
+}
+
+async function loadTopologyDraft(id = String(route.params.id), silentError = false) {
+  if (!id) return;
+  topologyDraftLoading.value = true;
+  try {
+    const draft = await apiRequest<GatewayTopologyDraft | null>({
+      url: `/api/devices/${id}/topology-draft`,
+      method: 'GET',
+      silentError,
+    });
+    if (id === String(route.params.id)) topologyDraft.value = draft ?? undefined;
+  } finally {
+    topologyDraftLoading.value = false;
+  }
+}
+
+async function confirmTopologyDraft() {
+  topologyDraftApplying.value = true;
+  try {
+    const result = await apiRequest<{ created: number; updated: number; unchanged: number; skipped: number }>({
+      url: `/api/devices/${String(route.params.id)}/topology-draft/confirm`,
+      method: 'POST',
+    });
+    ElMessage.success(`拓扑已确认，新增 ${result.created}，更新 ${result.updated}`);
+    await Promise.all([refreshDevice(), loadTopologyDraft(undefined, true)]);
+  } finally {
+    topologyDraftApplying.value = false;
+  }
+}
+
+async function ignoreTopologyDraft() {
+  topologyDraftApplying.value = true;
+  try {
+    topologyDraft.value = await apiRequest<GatewayTopologyDraft>({
+      url: `/api/devices/${String(route.params.id)}/topology-draft/ignore`,
+      method: 'POST',
+    });
+    ElMessage.success('拓扑草稿已忽略');
+  } finally {
+    topologyDraftApplying.value = false;
   }
 }
 
@@ -1166,6 +1300,7 @@ function resetPageState() {
   deviceLogs.value = [];
   deviceLogsTotal.value = 0;
   remoteConfigTasks.value = [];
+  topologyDraft.value = undefined;
   remoteDevices.value = [];
   remoteSnapshot.value = undefined;
   remoteSnapshotAt.value = undefined;
@@ -1183,16 +1318,14 @@ async function loadDeviceDetail(id = String(route.params.id)) {
   resetPageState();
   await Promise.all([loadPage(id), loadSettings(id), loadCredentials(id), loadDeviceLogs(id, true)]);
   if (id !== String(route.params.id)) return;
-  if (device.value?.deviceType === 'GATEWAY') await Promise.all([loadRemoteConfigs(id, true), loadCurrentRemoteConfig(id, true)]);
+  if (device.value?.deviceType === 'GATEWAY') await Promise.all([loadRemoteConfigs(id, true), loadCurrentRemoteConfig(id, true), loadTopologyDraft(id, true)]);
   selectedMetric.value = numericMetricKeys.value[0] ?? '';
   await loadTrend(id);
   void connectStream(id);
 }
 
 function formatMetrics(item: Record<string, unknown>) {
-  return Object.entries(item)
-    .filter(([key]) => key.trim() && metricEnabled(key))
-    .sort(([left], [right]) => metricSortOrder(left) - metricSortOrder(right))
+  return orderedMetricEntries(item)
     .map(([key, value]) => `${metricLabel(key)}: ${displayValue(value, key)}${metricUnit(key)}`)
     .join(' · ');
 }
@@ -1202,7 +1335,10 @@ onMounted(async () => {
   statusTimer = setInterval(() => void refreshDevice(), 30000);
   recentTelemetryTimer = setInterval(() => void refreshRecentTelemetry(), 2000);
   remoteConfigTimer = setInterval(() => {
-    if (device.value?.deviceType === 'GATEWAY') void loadRemoteConfigs(undefined, true);
+    if (device.value?.deviceType === 'GATEWAY') {
+      void loadRemoteConfigs(undefined, true);
+      void loadTopologyDraft(undefined, true);
+    }
   }, 5000);
   window.addEventListener('resize', resizeChart);
   await loadDeviceDetail();
@@ -1428,6 +1564,47 @@ watch(() => route.params.id, (id, oldId) => {
       </div>
     </section>
 
+    <section v-if="device?.deviceType === 'GATEWAY'" v-show="detailTab === 'config'" class="topology-panel">
+      <div class="section-heading">
+        <div>
+          <h2>网关上报拓扑</h2>
+          <p>Go 网关上报本地子设备和点表后，管理员确认才会写入正式云端关系。</p>
+        </div>
+        <div class="topology-actions">
+          <el-tag v-if="topologyDraft" :type="topologyStatusType(topologyDraft.status)">{{ topologyStatusLabel(topologyDraft.status) }}</el-tag>
+          <el-button :icon="RefreshRight" :loading="topologyDraftLoading" @click="loadTopologyDraft()">刷新</el-button>
+          <el-button v-if="canManage && topologyDraft && ['PENDING', 'CONFIRMED'].includes(topologyDraft.status)" type="primary" :disabled="topologyDraft.status === 'CONFIRMED'" :loading="topologyDraftApplying" @click="confirmTopologyDraft">确认拓扑</el-button>
+          <el-button v-if="canManage && topologyDraft && ['PENDING', 'CONFLICT'].includes(topologyDraft.status)" :loading="topologyDraftApplying" @click="ignoreTopologyDraft">忽略</el-button>
+        </div>
+      </div>
+      <div v-if="topologyDraft" class="topology-summary">
+        <div><span>上报时间</span><strong>{{ formatDateTime(topologyDraft.reportedAt) }}</strong></div>
+        <div><span>配置版本</span><code>{{ topologyDraft.reportedConfigVersion || '-' }}</code></div>
+        <div><span>新增</span><strong>{{ topologyDraftCounts.NEW }}</strong></div>
+        <div><span>更新</span><strong>{{ topologyDraftCounts.UPDATE }}</strong></div>
+        <div><span>冲突</span><strong>{{ topologyDraftCounts.CONFLICT }}</strong></div>
+        <div><span>未上报</span><strong>{{ topologyDraftCounts.MISSING_UNREPORTED }}</strong></div>
+      </div>
+      <el-alert v-if="topologyDraft?.status === 'CONFLICT'" class="topology-alert" type="error" :closable="false" show-icon title="拓扑存在冲突，请先处理重复 deviceKey 或跨网关归属后再确认。" />
+      <el-table v-loading="topologyDraftLoading" :data="topologyDraft?.items ?? []" empty-text="暂无网关上报拓扑" class="topology-table">
+        <el-table-column label="状态" width="120">
+          <template #default="{ row }"><el-tag :type="topologyItemStatusType(row.status)">{{ topologyItemStatusLabel(row.status) }}</el-tag></template>
+        </el-table-column>
+        <el-table-column prop="deviceKey" label="子设备编号" min-width="150" />
+        <el-table-column prop="name" label="名称" min-width="140" />
+        <el-table-column prop="protocol" label="协议" width="120" />
+        <el-table-column prop="address" label="地址" min-width="160" />
+        <el-table-column prop="slaveId" label="站号" width="90" />
+        <el-table-column label="点位" width="90"><template #default="{ row }">{{ row.pointCount ?? row.metrics?.length ?? 0 }}</template></el-table-column>
+        <el-table-column label="指标摘要" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">{{ (row.metrics ?? []).map((metric) => metric.identifier).join(', ') || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="冲突/说明" min-width="230" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.conflictReason || (row.status === 'MISSING_UNREPORTED' ? '当前云端子设备未出现在网关本次上报中' : '-') }}</template>
+        </el-table-column>
+      </el-table>
+    </section>
+
     <section v-if="device?.deviceType === 'GATEWAY'" v-show="detailTab === 'config'" class="relation-panel">
       <div class="section-heading">
         <div><h2>子设备</h2><p>网关使用自己的 MQTT 凭证代发下列子设备心跳和遥测</p></div>
@@ -1620,6 +1797,15 @@ watch(() => route.params.id, (id, oldId) => {
 .device-summary span { color: #94a3b8; }
 .device-summary strong { overflow: hidden; color: #111827; text-overflow: ellipsis; white-space: nowrap; }
 .relation-panel { margin-top: 18px; padding: 20px; border: 1px solid #e9eef5; border-radius: 12px; background: #fff; }
+.topology-panel { margin-top: 18px; padding: 20px; border: 1px solid #dbeafe; border-radius: 12px; background: #fff; box-shadow: 0 12px 30px rgb(37 99 235 / 5%); }
+.topology-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: flex-end; }
+.topology-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 16px; }
+.topology-summary div { min-width: 0; padding: 12px 14px; border-radius: 9px; background: #f8fafc; }
+.topology-summary span { display: block; margin-bottom: 5px; color: #94a3b8; font-size: 12px; }
+.topology-summary strong { color: #111827; font-size: 16px; }
+.topology-summary code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.topology-alert { margin-top: 14px; }
+.topology-table { margin-top: 14px; border: 1px solid #e5eaf1; border-radius: 9px; }
 .remote-config-panel { margin-top: 18px; padding: 20px; border: 1px solid #dbeafe; border-radius: 12px; background: #fff; box-shadow: 0 12px 30px rgb(37 99 235 / 5%); }
 .remote-config-tip { margin-top: 14px; }
 .remote-config-editor { margin-top: 14px; }

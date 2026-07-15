@@ -103,6 +103,7 @@ export class MqttAuthController {
     if (device.deviceType === 'GATEWAY') {
       if (action === 'subscribe' && [`weikong/gateways/${device.deviceKey}/config/set`, `weikong/gateways/${device.deviceKey}/config/get`].includes(topic)) return { result: 'allow' };
       if (action === 'publish' && [`weikong/gateways/${device.deviceKey}/config/reply`, `weikong/gateways/${device.deviceKey}/config/reported`].includes(topic)) return { result: 'allow' };
+      if (action === 'publish' && topic === `weikong/gateways/${device.deviceKey}/topology/reported`) return { result: 'allow' };
     }
     if (action !== 'publish') return { result: 'deny' };
     if (allowedPublishTopics.has(topic)) return { result: 'allow' };
@@ -123,7 +124,8 @@ export class MqttAuthController {
       || topic === 'weikong/gateways/+/children/+/heartbeat'
       || topic === 'weikong/gateways/+/children/+/telemetry'
       || topic === 'weikong/gateways/+/config/reply'
-      || topic === 'weikong/gateways/+/config/reported';
+      || topic === 'weikong/gateways/+/config/reported'
+      || topic === 'weikong/gateways/+/topology/reported';
   }
 
   private async canGatewayPublishChild(
@@ -157,6 +159,7 @@ export class MqttAuthController {
     if (device.deviceType === 'GATEWAY') {
       if (action === 'subscribe' && [`weikong/gateways/${device.deviceKey}/config/set`, `weikong/gateways/${device.deviceKey}/config/get`].includes(topic)) return { result: 'allow' };
       if (action === 'publish' && [`weikong/gateways/${device.deviceKey}/config/reply`, `weikong/gateways/${device.deviceKey}/config/reported`].includes(topic)) return { result: 'allow' };
+      if (action === 'publish' && topic === `weikong/gateways/${device.deviceKey}/topology/reported`) return { result: 'allow' };
     }
     if (action !== 'publish') return { result: 'deny' };
     if (topic === `weikong/devices/${device.deviceKey}/heartbeat` || topic === `weikong/devices/${device.deviceKey}/telemetry`) {

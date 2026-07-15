@@ -50,6 +50,7 @@ model Device {
   logs                  DeviceLog[]
   factoryGateway        FactoryGateway?
   remoteConfigTasks     RemoteConfigTask[]
+  topologyDrafts        GatewayTopologyDraft[] @relation("GatewayTopologyDraftGateway")
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
@@ -77,6 +78,29 @@ model RemoteConfigTask {
   @@index([deviceId])
   @@index([status])
   @@index([createdAt])
+}
+
+model GatewayTopologyDraft {
+  id                    String    @id @default(uuid())
+  gatewayDeviceId       String
+  gateway               Device    @relation("GatewayTopologyDraftGateway", fields: [gatewayDeviceId], references: [id], onDelete: Cascade)
+  gatewayKey            String
+  reportedConfigVersion String?
+  items                 Json
+  status                String    @default("PENDING")
+  conflicts             Json?
+  reportedAt            DateTime  @default(now())
+  confirmedAt           DateTime?
+  confirmedBy           String?
+  ignoredAt             DateTime?
+  ignoredBy             String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([gatewayDeviceId])
+  @@index([gatewayKey])
+  @@index([status])
+  @@index([reportedAt])
 }
 
 model FactoryGateway {

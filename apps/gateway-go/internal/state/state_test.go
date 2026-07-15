@@ -2,9 +2,40 @@ package state
 
 import (
 	"testing"
+	"time"
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 )
+
+func TestStoreChangeSubscriptionCoalescesWithoutBlockingCollector(t *testing.T) {
+	cfg := config.Config{Points: []config.PointConfig{{DeviceKey: "d1", Metric: "p1"}}}
+	store := New(cfg)
+	updates, unsubscribe := store.Subscribe()
+	defer unsubscribe()
+
+	store.SetPointValue("d1", "p1", 1)
+	store.SetPointValue("d1", "p1", 2)
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("did not receive store change signal")
+	}
+	pointRevision, statusRevision := store.Revisions()
+	if pointRevision != 2 || statusRevision != 0 {
+		t.Fatalf("revisions = %d/%d, want 2/0", pointRevision, statusRevision)
+	}
+
+	store.MarkCollect()
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("did not receive status change signal")
+	}
+	_, statusRevision = store.Revisions()
+	if statusRevision != 1 {
+		t.Fatalf("status revision = %d, want 1", statusRevision)
+	}
+}
 
 func TestMQTTChannelsRemainIndependent(t *testing.T) {
 	enabled := true

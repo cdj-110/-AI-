@@ -16,3 +16,16 @@ api.local.log
 apps/gateway-go/config.local.json
 apps/gateway-go/activation.local.json
 apps/gateway-go/gateway-*
+apps/gateway-go/.build/
+apps/gateway-go/.tools/
+apps/gateway-go/.tmp-*
+apps/gateway-go/*.local.dev.json
+apps/gateway-go/config.iec61850-local.json
+apps/gateway-go/*.exe~
+apps/gateway-go/iec61850read.exe
+apps/gateway-go/modbusread.exe
+apps/gateway-go/libiec61850.dll
+apps/gateway-go/deploy/eg100/*.zip
+apps/gateway-go/deploy/eg100/*.gz
+apps/gateway-go/deploy/eg100/weikong-gateway-linux-armv7
+eg100-config-backups/

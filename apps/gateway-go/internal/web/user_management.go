@@ -160,13 +160,22 @@ func normalizeSecurityUsers(input []securityUserPayload, existingHashes map[stri
 		if passwordHash == "" {
 			return nil, errText("请为账号 " + username + " 设置密码")
 		}
+		roleKey := valueOrDefault(strings.TrimSpace(item.RoleKey), "viewer")
+		enabled := item.Enabled
+		if username == "admin" {
+			roleKey = "admin"
+			enabled = true
+		}
 		users = append(users, config.UserConfig{
 			Username:     username,
 			DisplayName:  strings.TrimSpace(item.DisplayName),
 			PasswordHash: passwordHash,
-			RoleKey:      valueOrDefault(strings.TrimSpace(item.RoleKey), "viewer"),
-			Enabled:      item.Enabled,
+			RoleKey:      roleKey,
+			Enabled:      enabled,
 		})
+	}
+	if !seen["admin"] {
+		return nil, errText("超级管理员 admin 不可删除")
 	}
 	sort.SliceStable(users, func(i, j int) bool { return users[i].Username < users[j].Username })
 	return users, nil

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"weikong-iot-platform/apps/gateway-go/internal/config"
 )
 
 const restartDelayEnv = "GATEWAY_RESTART_DELAY_MS"
@@ -18,6 +20,10 @@ const restartDelayEnv = "GATEWAY_RESTART_DELAY_MS"
 type pingRequest struct {
 	Target string `json:"target"`
 	Count  int    `json:"count"`
+}
+
+type factoryResetRequest struct {
+	AdminPassword string `json:"adminPassword"`
 }
 
 func (s *Server) pingDiagnostic(writer http.ResponseWriter, request *http.Request) {
@@ -93,6 +99,124 @@ func (s *Server) rebootGateway(writer http.ResponseWriter, request *http.Request
 		time.Sleep(300 * time.Millisecond)
 		_ = exec.Command("reboot").Start()
 	}()
+}
+
+func (s *Server) factoryReset(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.hasPermission(request, "config.manage") {
+		http.Error(writer, "forbidden", http.StatusForbidden)
+		return
+	}
+	var body factoryResetRequest
+	if request.Body != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64*1024))
+		if err := decoder.Decode(&body); err != nil && err.Error() != "EOF" {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	user, ok := s.currentUser(request)
+	if !ok {
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !isSuperAdminUser(user) {
+		if strings.TrimSpace(body.AdminPassword) == "" {
+			http.Error(writer, "super admin password is required", http.StatusForbidden)
+			return
+		}
+		if !s.verifySuperAdminPassword(body.AdminPassword) {
+			http.Error(writer, "super admin password is incorrect", http.StatusForbidden)
+			return
+		}
+	}
+	current, err := s.readRawConfig()
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	next := factoryDefaultConfig(current)
+	if err := config.Save(s.configPath, next); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.applyConfig(next)
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(writer).Encode(map[string]interface{}{
+		"ok":              true,
+		"gatewayKey":      next.GatewayKey,
+		"restartRequired": false,
+	})
+}
+
+func factoryDefaultConfig(current config.Config) config.Config {
+	disabled := false
+	gatewayKey := strings.TrimSpace(current.GatewayKey)
+	if gatewayKey == "" {
+		gatewayKey = "gateway"
+	}
+	next := config.Config{
+		GatewayKey:             gatewayKey,
+		CollectIntervalSeconds: 5,
+		CacheFile:              ".runtime/gateway-spool.jsonl",
+		OfflineCache: config.OfflineCacheConfig{
+			Enabled:   false,
+			MaxSizeMB: 16,
+		},
+		HistoryStorage: config.HistoryStorageConfig{
+			Enabled:   false,
+			MaxSizeMB: 256,
+		},
+		Activation: config.ActivationConfig{
+			Enabled: &disabled,
+		},
+		MQTT: config.MQTTConfig{
+			Enabled: &disabled,
+		},
+		WiFi: config.WiFiConfig{
+			Enabled: false,
+		},
+		Cellular: config.CellularConfig{
+			Enabled: &disabled,
+		},
+		ForwardSlave: config.FeatureConfig{
+			Enabled: false,
+			Listen:  "0.0.0.0:1502",
+		},
+		Web:      current.Web,
+		Security: current.Security,
+	}
+	if next.Web.Listen == "" {
+		next.Web = config.ListenerConfig{Enabled: true, Listen: "0.0.0.0:8088"}
+	}
+	next.ApplyDefaults()
+	next.Devices = nil
+	next.Points = nil
+	return next
+}
+
+func isSuperAdminUser(user currentUserInfo) bool {
+	return user.Username == "admin"
+}
+
+func (s *Server) verifySuperAdminPassword(password string) bool {
+	password = strings.TrimSpace(password)
+	if password == "" {
+		return false
+	}
+	security, err := s.loadSecurity()
+	if err == nil && len(security.Users) > 0 {
+		for _, user := range security.Users {
+			if user.Username == "admin" && user.Enabled && verifyPasswordHash(user.PasswordHash, password) {
+				return true
+			}
+		}
+		return false
+	}
+	return s.authState().password == password
 }
 
 func scheduleSelfRestart() error {

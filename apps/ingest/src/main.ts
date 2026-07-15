@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import mqtt from 'mqtt';
 import { Pool } from 'pg';
 
@@ -12,6 +12,7 @@ const telemetryTopic = 'weikong/devices/+/telemetry';
 // 网关代发主题：网关设备用自己的凭证替子设备发布心跳/遥测。
 const gatewayChildHeartbeatTopic = 'weikong/gateways/+/children/+/heartbeat';
 const gatewayChildTelemetryTopic = 'weikong/gateways/+/children/+/telemetry';
+const gatewayTopologyTopic = 'weikong/gateways/+/topology/reported';
 const factoryGatewayHeartbeatTopic = 'weikong/factory/+/heartbeat';
 // EMQX 系统事件用于快速感知 MQTT 客户端连接/断开。
 const connectedTopic = '$SYS/brokers/+/clients/+/connected';
@@ -98,6 +99,10 @@ client.on('connect', () => {
     if (error) console.error('[ingest] gateway child subscribe failed', error);
     else console.log('[ingest] subscribed to gateway child topics');
   });
+  client.subscribe(gatewayTopologyTopic, (error) => {
+    if (error) console.error('[ingest] gateway topology subscribe failed', error);
+    else console.log(`[ingest] subscribed to ${gatewayTopologyTopic}`);
+  });
   client.subscribe(factoryGatewayHeartbeatTopic, (error) => {
     if (error) console.error('[ingest] factory gateway subscribe failed', error);
     else console.log(`[ingest] subscribed to ${factoryGatewayHeartbeatTopic}`);
@@ -116,6 +121,11 @@ client.on('message', async (topic, payload) => {
   const factoryHeartbeat = topic.match(/^weikong\/factory\/([^/]+)\/heartbeat$/);
   if (factoryHeartbeat) {
     await processFactoryGatewayHeartbeat(factoryHeartbeat[1]);
+    return;
+  }
+  const topologyReport = topic.match(/^weikong\/gateways\/([^/]+)\/topology\/reported$/);
+  if (topologyReport) {
+    await processGatewayTopology(topologyReport[1], payload);
     return;
   }
   // 同一入口同时处理直连设备和网关子设备，先把 Topic 解析成统一路由结构。
@@ -269,15 +279,195 @@ async function processFactoryGatewayHeartbeat(hardwareId: string) {
   console.log(`[ingest] factory heartbeat ${normalizedHardwareId}${factoryGateway.device ? ` -> ${factoryGateway.device.deviceKey}` : ' (unbound)'}`);
 }
 
+interface ReportedTopologyDevice {
+  deviceKey: string;
+  name?: string;
+  protocol?: string;
+  address?: string;
+  slaveId?: number;
+  pointCount?: number;
+  metrics?: ReportedTopologyMetric[];
+}
+
+interface ReportedTopologyMetric {
+  identifier: string;
+  name?: string;
+  dataType?: string;
+  unit?: string;
+}
+
+async function processGatewayTopology(gatewayKey: string, payload: Buffer) {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(payload.toString());
+  } catch (error) {
+    console.warn(`[ingest] ignored invalid topology ${gatewayKey}`, error);
+    return;
+  }
+  const payloadGatewayKey = stringValue(parsed.gatewayKey) || gatewayKey;
+  if (payloadGatewayKey !== gatewayKey) {
+    console.warn(`[ingest] ignored topology gateway mismatch topic=${gatewayKey} payload=${payloadGatewayKey}`);
+    return;
+  }
+  const gateway = await prisma.device.findFirst({
+    where: { deviceKey: gatewayKey, deviceType: 'GATEWAY' },
+    include: { children: true },
+  });
+  if (!gateway) {
+    console.warn(`[ingest] ignored topology from unknown gateway ${gatewayKey}`);
+    return;
+  }
+  const reportedDevices = normalizeTopologyDevices(parsed.devices);
+  const deviceKeys = [...new Set(reportedDevices.map((device) => device.deviceKey))];
+  const existingDevices = deviceKeys.length
+    ? await prisma.device.findMany({
+        where: { deviceKey: { in: deviceKeys } },
+        include: { gateway: { select: { id: true, deviceKey: true } } },
+      })
+    : [];
+  const existingByKey = new Map(existingDevices.map((device) => [device.deviceKey, device]));
+  const reportedKeySet = new Set(deviceKeys);
+  const items: Array<Record<string, unknown>> = [];
+  const conflicts: Array<{ deviceKey: string; reason: string }> = [];
+
+  for (const reported of reportedDevices) {
+    const existing = existingByKey.get(reported.deviceKey);
+    if (!existing) {
+      items.push({ ...reported, status: 'NEW' });
+      continue;
+    }
+    const conflictReason =
+      existing.id === gateway.id ? 'deviceKey matches gateway itself'
+      : existing.tenantId !== gateway.tenantId ? 'deviceKey belongs to another tenant'
+      : existing.gatewayId && existing.gatewayId !== gateway.id ? 'deviceKey belongs to another gateway'
+      : existing.deviceType !== 'GATEWAY_CHILD' && existing.deviceType !== 'DIRECT' ? `device type ${existing.deviceType} cannot become gateway child`
+      : '';
+    if (conflictReason) {
+      items.push({
+        ...reported,
+        status: 'CONFLICT',
+        existingDeviceId: existing.id,
+        currentGatewayId: existing.gatewayId,
+        currentGatewayKey: existing.gateway?.deviceKey,
+        conflictReason,
+      });
+      conflicts.push({ deviceKey: reported.deviceKey, reason: conflictReason });
+      continue;
+    }
+    items.push({
+      ...reported,
+      status: hasTopologyChange(existing, reported, gateway.id) ? 'UPDATE' : 'UNCHANGED',
+      existingDeviceId: existing.id,
+      currentGatewayId: existing.gatewayId,
+      currentGatewayKey: existing.gateway?.deviceKey,
+    });
+  }
+
+  for (const child of gateway.children) {
+    if (reportedKeySet.has(child.deviceKey)) continue;
+    items.push({
+      deviceKey: child.deviceKey,
+      name: child.name,
+      protocol: child.protocol,
+      status: 'MISSING_UNREPORTED',
+      existingDeviceId: child.id,
+      currentGatewayId: gateway.id,
+      currentGatewayKey: gateway.deviceKey,
+    });
+  }
+
+  const hasPendingChange = items.some((item) => ['NEW', 'UPDATE', 'MISSING_UNREPORTED'].includes(String(item.status)));
+  const status = conflicts.length ? 'CONFLICT' : hasPendingChange ? 'PENDING' : 'CONFIRMED';
+  await prisma.gatewayTopologyDraft.upsert({
+    where: { gatewayDeviceId: gateway.id },
+    create: {
+      gatewayDeviceId: gateway.id,
+      gatewayKey,
+      reportedConfigVersion: stringValue(parsed.configVersion) || undefined,
+      items: items as unknown as Prisma.InputJsonValue,
+      conflicts: conflicts.length ? conflicts as unknown as Prisma.InputJsonValue : undefined,
+      status,
+      reportedAt: parseDate(parsed.updatedAt) ?? new Date(),
+    },
+    update: {
+      gatewayKey,
+      reportedConfigVersion: stringValue(parsed.configVersion) || null,
+      items: items as unknown as Prisma.InputJsonValue,
+      conflicts: conflicts.length ? conflicts as unknown as Prisma.InputJsonValue : Prisma.DbNull,
+      status,
+      reportedAt: parseDate(parsed.updatedAt) ?? new Date(),
+      confirmedAt: null,
+      confirmedBy: null,
+      ignoredAt: null,
+      ignoredBy: null,
+    },
+  });
+  console.log(`[ingest] topology ${gatewayKey} devices=${reportedDevices.length} status=${status}`);
+}
+
+function normalizeTopologyDevices(value: unknown): ReportedTopologyDevice[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const devices: ReportedTopologyDevice[] = [];
+  for (const item of value) {
+    if (!isPlainObject(item)) continue;
+    const deviceKey = stringValue(item.deviceKey).trim();
+    if (!deviceKey || seen.has(deviceKey)) continue;
+    seen.add(deviceKey);
+    const metrics = Array.isArray(item.metrics)
+      ? item.metrics.map(normalizeTopologyMetric).filter((metric): metric is ReportedTopologyMetric => Boolean(metric))
+      : [];
+    devices.push({
+      deviceKey,
+      name: stringValue(item.name) || undefined,
+      protocol: stringValue(item.protocol) || undefined,
+      address: stringValue(item.address) || undefined,
+      slaveId: typeof item.slaveId === 'number' ? item.slaveId : undefined,
+      pointCount: typeof item.pointCount === 'number' ? item.pointCount : metrics.length,
+      metrics,
+    });
+  }
+  return devices;
+}
+
+function normalizeTopologyMetric(value: unknown): ReportedTopologyMetric | null {
+  if (!isPlainObject(value)) return null;
+  const identifier = stringValue(value.identifier).trim();
+  if (!identifier) return null;
+  return {
+    identifier,
+    name: stringValue(value.name) || undefined,
+    dataType: stringValue(value.dataType) || undefined,
+    unit: stringValue(value.unit) || undefined,
+  };
+}
+
+function hasTopologyChange(
+  existing: { name: string; protocol: string; gatewayId: string | null },
+  reported: ReportedTopologyDevice,
+  gatewayId: string,
+) {
+  return existing.gatewayId !== gatewayId
+    || Boolean(reported.name && reported.name !== existing.name)
+    || Boolean(reported.protocol && reported.protocol !== existing.protocol);
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : '';
+}
+
+function parseDate(value: unknown) {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
 async function processConnectionStatus(topic: string) {
   const match = topic.match(/^\$SYS\/brokers\/[^/]+\/clients\/([^/]+)\/(connected|disconnected)$/);
   if (!match) return;
   const [, mqttClientId, event] = match;
   if (mqttClientId.startsWith('weikong-ingest-')) return;
-  const device = await prisma.device.findFirst({
-    where: { OR: [{ mqttClientId }, { deviceKey: mqttClientId }] },
-    select: { id: true, tenantId: true, deviceKey: true, name: true, status: true },
-  });
+  const device = await findDeviceByMqttClientId(mqttClientId);
   if (!device) return;
   if (event === 'connected') {
     // 连接事件可以立即把设备置为在线，断开事件会先等待 grace 时间防抖。
@@ -293,6 +483,23 @@ async function processConnectionStatus(topic: string) {
   await recordDeviceLog(device, 'MQTT_DISCONNECTED', 'MQTT_BROKER', 'MQTT 客户端已断开，等待离线判定', { mqttClientId, disconnectGraceSeconds });
   schedulePendingOffline(device.deviceKey);
   console.log(`[ingest] client disconnected ${device.deviceKey}, waiting ${disconnectGraceSeconds}s before marking offline`);
+}
+
+async function findDeviceByMqttClientId(mqttClientId: string) {
+  if (mqttClientId.startsWith('factory_')) {
+    const hardwareId = mqttClientId.slice('factory_'.length).trim().toUpperCase();
+    if (hardwareId) {
+      const factoryGateway = await prisma.factoryGateway.findUnique({
+        where: { hardwareId },
+        include: { device: { select: { id: true, tenantId: true, deviceKey: true, name: true, status: true } } },
+      });
+      if (factoryGateway?.device) return factoryGateway.device;
+    }
+  }
+  return prisma.device.findFirst({
+    where: { OR: [{ mqttClientId }, { deviceKey: mqttClientId }] },
+    select: { id: true, tenantId: true, deviceKey: true, name: true, status: true },
+  });
 }
 
 async function updateDeviceStatus(device: DeviceLogTarget, status: string, source: string) {

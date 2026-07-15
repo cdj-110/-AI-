@@ -30,33 +30,40 @@ type iec104Client struct {
 	sendSeq      uint16
 	recvSeq      uint16
 	commonAS     uint16
+	options      config.IEC104Config
+	done         chan struct{}
 	updated      time.Time
+}
+
+type iec104ConnectCall struct {
+	done       chan struct{}
+	client     *iec104Client
+	err        error
+	generation uint64
 }
 
 var iec104Pool = struct {
 	sync.Mutex
-	items map[string]*iec104Client
-}{items: map[string]*iec104Client{}}
+	items      map[string]*iec104Client
+	connecting map[string]*iec104ConnectCall
+	generation uint64
+}{
+	items:      map[string]*iec104Client{},
+	connecting: map[string]*iec104ConnectCall{},
+}
 
 func (IEC104) ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
-	client, err := getIEC104Client(point)
+	client, err := getIEC104Client(ctx, point)
 	if err != nil {
 		return model.PointValue{}, err
 	}
-	ioa := uint32(point.Register)
+	ioa := iec104PointIOA(point)
 	if ioa == 0 {
 		return model.PointValue{}, fmt.Errorf("IEC104 IOA 信息对象地址不能为空")
 	}
-	client.mu.Lock()
-	previousUpdate := client.valueUpdated[ioa]
-	client.mu.Unlock()
-	if err := client.interrogate(); err != nil {
-		return model.PointValue{}, fmt.Errorf("IEC104 总召唤发送失败：%w", err)
-	}
-
 	deadline := time.Now().Add(4500 * time.Millisecond)
 	for {
-		value, ok := client.valueAfter(ioa, previousUpdate)
+		value, ok := client.value(ioa)
 		if ok {
 			value = applyIEC104Scale(point, value)
 			return model.PointValue{DeviceKey: point.DeviceKey, Metric: point.Metric, Value: value}, nil
@@ -89,6 +96,7 @@ func TestIEC104Connection(ctx context.Context, address string, commonAS uint16) 
 		values:       map[uint32]interface{}{},
 		valueUpdated: map[uint32]time.Time{},
 		commonAS:     commonAS,
+		done:         make(chan struct{}),
 	}
 	if err := client.start(); err != nil {
 		return result, err
@@ -115,9 +123,9 @@ func applyIEC104Scale(point config.PointConfig, value interface{}) interface{} {
 	}
 }
 
-func getIEC104Client(point config.PointConfig) (*iec104Client, error) {
+func getIEC104Client(ctx context.Context, point config.PointConfig) (result *iec104Client, resultErr error) {
 	address := iec104Address(point.Address)
-	commonAS := uint16(point.SlaveID)
+	commonAS := iec104CommonAddress(point)
 	if commonAS == 0 {
 		commonAS = 1
 	}
@@ -128,7 +136,43 @@ func getIEC104Client(point config.PointConfig) (*iec104Client, error) {
 		iec104Pool.Unlock()
 		return client, nil
 	}
+	if call := iec104Pool.connecting[key]; call != nil {
+		iec104Pool.Unlock()
+		select {
+		case <-call.done:
+			return call.client, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	call := &iec104ConnectCall{
+		done:       make(chan struct{}),
+		generation: iec104Pool.generation,
+	}
+	iec104Pool.connecting[key] = call
 	iec104Pool.Unlock()
+
+	defer func() {
+		iec104Pool.Lock()
+		if call.generation != iec104Pool.generation && resultErr == nil {
+			_ = result.conn.Close()
+			result = nil
+			resultErr = fmt.Errorf("IEC104 connection was closed while being established")
+		}
+		if resultErr == nil {
+			iec104Pool.items[key] = result
+		}
+		call.client = result
+		call.err = resultErr
+		delete(iec104Pool.connecting, key)
+		close(call.done)
+		iec104Pool.Unlock()
+
+		if resultErr == nil {
+			go result.readLoop(key)
+			result.startConfiguredCommands()
+		}
+	}()
 
 	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
 	if err != nil {
@@ -139,23 +183,42 @@ func getIEC104Client(point config.PointConfig) (*iec104Client, error) {
 		values:       map[uint32]interface{}{},
 		valueUpdated: map[uint32]time.Time{},
 		commonAS:     commonAS,
+		options:      iec104Options(point),
+		done:         make(chan struct{}),
 	}
 	if err := client.start(); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
-	go client.readLoop(key)
-	_ = client.interrogate()
-
-	iec104Pool.Lock()
-	if existing := iec104Pool.items[key]; existing != nil {
-		iec104Pool.Unlock()
-		_ = conn.Close()
-		return existing, nil
-	}
-	iec104Pool.items[key] = client
-	iec104Pool.Unlock()
 	return client, nil
+}
+
+func iec104CommonAddress(point config.PointConfig) uint16 {
+	if point.CommonAddress != 0 {
+		return point.CommonAddress
+	}
+	if point.SlaveID != 0 {
+		return uint16(point.SlaveID)
+	}
+	return 1
+}
+
+func iec104PointIOA(point config.PointConfig) uint32 {
+	if point.IOA != 0 {
+		return point.IOA
+	}
+	return uint32(point.Register)
+}
+
+func iec104Options(point config.PointConfig) config.IEC104Config {
+	if point.IEC104 != nil {
+		options := *point.IEC104
+		options.ApplyDefaults()
+		return options
+	}
+	options := config.IEC104Config{}
+	options.ApplyDefaults()
+	return options
 }
 
 func iec104Address(address string) string {
@@ -188,8 +251,6 @@ func (c *iec104Client) start() error {
 }
 
 func (c *iec104Client) interrogate() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	asdu := []byte{
 		100, 0x01,
 		0x06, 0x00,
@@ -197,9 +258,78 @@ func (c *iec104Client) interrogate() error {
 		0x00, 0x00, 0x00,
 		20,
 	}
-	packet := c.iFrame(asdu)
-	_, err := c.conn.Write(packet)
+	return c.sendASDU(asdu)
+}
+
+func (c *iec104Client) counterInterrogate() error {
+	return c.sendASDU([]byte{
+		101, 0x01,
+		0x06, 0x00,
+		byte(c.commonAS), byte(c.commonAS >> 8),
+		0x00, 0x00, 0x00,
+		0x05,
+	})
+}
+
+func (c *iec104Client) clockSync(now time.Time) error {
+	local := now.Local()
+	milliseconds := uint16(local.Second()*1000 + local.Nanosecond()/int(time.Millisecond))
+	dayOfWeek := int(local.Weekday())
+	if dayOfWeek == 0 {
+		dayOfWeek = 7
+	}
+	cp56 := []byte{
+		byte(milliseconds), byte(milliseconds >> 8),
+		byte(local.Minute()), byte(local.Hour()),
+		byte(local.Day() | dayOfWeek<<5), byte(local.Month()), byte(local.Year() % 100),
+	}
+	asdu := []byte{
+		103, 0x01,
+		0x06, 0x00,
+		byte(c.commonAS), byte(c.commonAS >> 8),
+		0x00, 0x00, 0x00,
+	}
+	return c.sendASDU(append(asdu, cp56...))
+}
+
+func (c *iec104Client) sendASDU(asdu []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.conn.Write(c.iFrame(asdu))
 	return err
+}
+
+func (c *iec104Client) startConfiguredCommands() {
+	if c.options.GeneralInterrogationOnStart {
+		_ = c.interrogate()
+	}
+	if c.options.ClockSyncOnStart {
+		_ = c.clockSync(time.Now())
+	}
+	if c.options.CounterInterrogationOnStart {
+		_ = c.counterInterrogate()
+	}
+	c.startPeriodicCommand(c.options.GeneralInterrogationIntervalSeconds, c.interrogate)
+	c.startPeriodicCommand(c.options.ClockSyncIntervalSeconds, func() error { return c.clockSync(time.Now()) })
+	c.startPeriodicCommand(c.options.CounterInterrogationIntervalSeconds, c.counterInterrogate)
+}
+
+func (c *iec104Client) startPeriodicCommand(seconds int, command func() error) {
+	if seconds <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(time.Duration(seconds) * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = command()
+			case <-c.done:
+				return
+			}
+		}
+	}()
 }
 
 func (c *iec104Client) iFrame(asdu []byte) []byte {
@@ -218,8 +348,11 @@ func (c *iec104Client) iFrame(asdu []byte) []byte {
 func (c *iec104Client) readLoop(key string) {
 	defer func() {
 		_ = c.conn.Close()
+		close(c.done)
 		iec104Pool.Lock()
-		delete(iec104Pool.items, key)
+		if iec104Pool.items[key] == c {
+			delete(iec104Pool.items, key)
+		}
 		iec104Pool.Unlock()
 	}()
 	for {
@@ -228,6 +361,17 @@ func (c *iec104Client) readLoop(key string) {
 			return
 		}
 		c.handlePacket(packet)
+	}
+}
+
+func CloseIEC104Connections() {
+	iec104Pool.Lock()
+	items := iec104Pool.items
+	iec104Pool.items = map[string]*iec104Client{}
+	iec104Pool.generation++
+	iec104Pool.Unlock()
+	for _, client := range items {
+		_ = client.conn.Close()
 	}
 }
 
@@ -319,6 +463,13 @@ func (c *iec104Client) valueAfter(ioa uint32, after time.Time) (interface{}, boo
 	defer c.mu.Unlock()
 	value, ok := c.values[ioa]
 	return value, ok && c.valueUpdated[ioa].After(after)
+}
+
+func (c *iec104Client) value(ioa uint32) (interface{}, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	value, ok := c.values[ioa]
+	return value, ok
 }
 
 func decodeIEC104Value(typeID byte, raw []byte) (interface{}, int, bool) {
