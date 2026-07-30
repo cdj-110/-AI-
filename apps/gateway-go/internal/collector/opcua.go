@@ -44,8 +44,16 @@ var opcuaPool = struct {
 	items map[string]*opcuaConnection
 }{items: map[string]*opcuaConnection{}}
 
-func (OPCUA) ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
+func (OPCUA) ReadPoint(ctx context.Context, point config.PointConfig) (result model.PointValue, resultErr error) {
 	nodeID := strings.TrimSpace(point.NodeID)
+	recordSemanticRequest("opcua", point, "ReadValue 请求 NodeId="+nodeID)
+	defer func() {
+		if resultErr != nil {
+			recordSemanticResponse("opcua", point, "ReadValue 响应失败 NodeId="+nodeID, resultErr)
+		} else {
+			recordSemanticResponse("opcua", point, fmt.Sprintf("ReadValue 响应 NodeId=%s 值=%v", nodeID, result.Value), nil)
+		}
+	}()
 	if nodeID == "" {
 		return model.PointValue{}, fmt.Errorf("OPC UA NodeId 不能为空，例如 ns=2;s=Temperature")
 	}

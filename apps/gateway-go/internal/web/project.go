@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -39,19 +38,19 @@ func (s *Server) exportProject(writer http.ResponseWriter, request *http.Request
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	raw, err := os.ReadFile(s.configPath)
+	cfg, err := config.Load(s.configPath)
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var project struct {
-		GatewayKey string `json:"gatewayKey"`
-	}
-	if err := json.Unmarshal(raw, &project); err != nil {
+	project := config.RedactSecrets(cfg)
+	raw, err := json.MarshalIndent(project, "", "  ")
+	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	filename := fmt.Sprintf("weikong-project-%s-%s.json", safeProjectName(project.GatewayKey), time.Now().Format("20060102-150405"))
+	raw = append(raw, '\n')
+	filename := fmt.Sprintf("weikong-project-%s-%s.json", safeProjectName(cfg.GatewayKey), time.Now().Format("20060102-150405"))
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	writer.Header().Set("Cache-Control", "no-store")
@@ -73,15 +72,25 @@ func (s *Server) importProject(writer http.ResponseWriter, request *http.Request
 		http.Error(writer, "parse project failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if previous, previousErr := config.Load(s.configPath); previousErr == nil {
+		config.PreserveMaskedSecrets(previous, &cfg)
+		cfg.ApplyDefaults()
+		if err := cfg.ValidateNewGlobalIdentifierDuplicates(previous); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if err := cfg.ValidateGlobalDeviceKeys(); err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := edgecompute.Validate(cfg); err != nil {
 		http.Error(writer, "validate edge computing failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := config.Save(s.configPath, cfg); err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	if err := s.saveAndApplyConfig(cfg); err != nil {
+		http.Error(writer, "apply project failed and previous configuration was restored: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.applyConfig(cfg)
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(writer).Encode(map[string]interface{}{
 		"ok":              true,
@@ -124,17 +133,34 @@ func readProjectImport(writer http.ResponseWriter, request *http.Request) ([]byt
 	return raw, nil
 }
 
-func (s *Server) applyConfig(cfg config.Config) {
+func (s *Server) applyConfig(cfg config.Config) error {
 	if s.store != nil {
 		s.store.ResetMQTTChannels(cfg)
 	}
 	if s.onConfig != nil {
-		s.onConfig(cfg)
-		return
+		return s.onConfig(cfg)
 	}
 	if s.runtime != nil {
 		s.runtime.UpdateConfig(cfg)
 	}
+	return nil
+}
+
+func (s *Server) saveAndApplyConfig(cfg config.Config) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	previous, previousErr := config.Load(s.configPath)
+	if err := config.Save(s.configPath, cfg); err != nil {
+		return err
+	}
+	if err := s.applyConfig(cfg); err != nil {
+		if previousErr == nil {
+			_ = config.Save(s.configPath, previous)
+			_ = s.applyConfig(previous)
+		}
+		return err
+	}
+	return nil
 }
 
 func safeProjectName(name string) string {

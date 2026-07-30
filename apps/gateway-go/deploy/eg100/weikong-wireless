@@ -1,0 +1,37 @@
+#!/bin/sh
+
+MARKER="/userdata/weikong/config/wireless-enabled"
+
+status() {
+	if [ -f "$MARKER" ]; then
+		echo "configured: enabled"
+	else
+		echo "configured: disabled"
+	fi
+	if ip link show wlan0 >/dev/null 2>&1; then
+		echo "runtime: enabled"
+	else
+		echo "runtime: disabled"
+	fi
+}
+
+case "${1:-status}" in
+	enable)
+		mkdir -p "$(dirname "$MARKER")"
+		touch "$MARKER"
+		sync
+		echo "WiFi/Bluetooth will be enabled after reboot."
+		;;
+	disable)
+		rm -f "$MARKER"
+		sync
+		echo "WiFi/Bluetooth will be disabled after reboot."
+		;;
+	status)
+		status
+		;;
+	*)
+		echo "Usage: weikong-wireless {enable|disable|status}" >&2
+		exit 2
+		;;
+esac

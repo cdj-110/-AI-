@@ -1,0 +1,163 @@
+/* Legacy collapsed-navigation placement: the control straddles the sidebar edge. */
+.collapsed .sidebar {
+  z-index: 300;
+  overflow: visible;
+}
+
+.collapsed .brand {
+  z-index: 310;
+  grid-template-columns: 40px;
+  justify-content: center;
+  width: 64px;
+  padding: 0;
+  overflow: visible;
+}
+
+.collapsed .nav-collapse {
+  position: fixed;
+  z-index: 320;
+  top: 16px;
+  left: 52px;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  border: 1px solid #e5eaf2;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .18);
+}
+
+/* Legacy settings-gear hover feedback. */
+.header-more-button svg {
+  transition: transform .22s ease;
+}
+
+.header-more-button:hover svg,
+.header-more-button[aria-expanded="true"] svg {
+  transform: rotate(28deg);
+}
+
+/* Restore the legacy header controls shown in the original gateway UI. */
+.header-actions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: max-content;
+}
+
+.point-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 42px;
+  padding: 4px;
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  background: #f6f8fb;
+}
+
+.point-mode-toggle button {
+  min-width: 64px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  color: #334155;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  font-size: 14px;
+}
+
+.point-mode-toggle button:first-child.active {
+  color: #1677ff;
+  background: #eff6ff;
+}
+
+.point-mode-toggle button:last-child.active {
+  color: #fff;
+  background: #16a34a;
+  box-shadow: 0 3px 8px rgba(22, 163, 74, .18);
+}
+
+.header-more-wrap {
+  position: relative;
+  display: flex;
+}
+
+.header-more-wrap > .header-more-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  color: #64748b;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.header-more-wrap > .header-more-button:hover,
+.header-more-wrap > .header-more-button[aria-expanded="true"] {
+  border: 0;
+  color: #1677ff;
+  background: #eaf4ff;
+  box-shadow: none;
+  transform: none;
+}
+
+.header-more-button svg {
+  width: 19px;
+  height: 19px;
+}
+
+.header-more-wrap .header-more-menu {
+  top: 42px;
+  right: 0;
+  gap: 3px;
+  width: 150px;
+  padding: 6px;
+  border: 1px solid #e2e8f0;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, .15);
+}
+
+.header-more-menu button,
+.header-more-menu a {
+  justify-content: flex-start;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  color: #334155;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  text-align: left;
+}
+
+.header-more-menu button:hover,
+.header-more-menu a:hover {
+  color: #1677ff;
+  background: #eff6ff;
+  box-shadow: none;
+  transform: none;
+}
+
+.header-more-menu .logout-button {
+  color: #475569;
+  background: #f8fafc;
+}
+
+.header-more-menu .logout-button:hover {
+  color: #334155;
+  background: #f1f5f9;
+}

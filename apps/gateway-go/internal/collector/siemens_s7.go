@@ -58,10 +58,20 @@ var goS7Pool = struct {
 }{items: map[string]*goS7Connection{}}
 
 func (SiemensS7) ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
+	recordSemanticRequest("siemens-s7", point, fmt.Sprintf("读请求 区域=%s DB=%d 起始=%d", point.Area, point.DBNumber, point.Register))
+	var result model.PointValue
+	var err error
 	if !hasCustomTSAP(point) {
-		return readPointWithGoS7(ctx, point)
+		result, err = readPointWithGoS7(ctx, point)
+	} else {
+		result, err = readS7PointWithEndpointFallback(ctx, point)
 	}
-	return readS7PointWithEndpointFallback(ctx, point)
+	if err != nil {
+		recordSemanticResponse("siemens-s7", point, "读响应失败", err)
+	} else {
+		recordSemanticResponse("siemens-s7", point, fmt.Sprintf("读响应 值=%v", result.Value), nil)
+	}
+	return result, err
 }
 
 func readPointWithGoS7(ctx context.Context, point config.PointConfig) (model.PointValue, error) {

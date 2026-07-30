@@ -2,6 +2,12 @@ package cloud
 
 import "testing"
 
+func TestMQTTTLSRequiresCertificateAndKeyTogether(t *testing.T) {
+	if _, err := mqttTLSConfig(MQTTOptions{CertFile: "client.crt"}); err == nil {
+		t.Fatal("expected incomplete client certificate configuration to fail")
+	}
+}
+
 func TestRenderManualTopicUsesTemplate(t *testing.T) {
 	client := &Client{gatewayKey: "gw-1", topicTemplate: "gateways/{gatewayKey}/telemetry"}
 

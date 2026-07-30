@@ -157,6 +157,18 @@ func TestCollectionLanesAreSplitByDeviceAndChannel(t *testing.T) {
 	}
 }
 
+func TestProtectedLargeLaneInterval(t *testing.T) {
+	if got := protectedLargeLaneInterval(50000, 250*time.Millisecond); got != 250*time.Millisecond {
+		t.Fatalf("small lane interval = %s", got)
+	}
+	if got := protectedLargeLaneInterval(300000, 250*time.Millisecond); got != 6*time.Second {
+		t.Fatalf("300k lane interval = %s, want 6s", got)
+	}
+	if got := protectedLargeLaneInterval(300000, 10*time.Second); got != 10*time.Second {
+		t.Fatalf("slower configured interval = %s", got)
+	}
+}
+
 func TestFindWritablePointOnlyReturnsModbusOutputAreas(t *testing.T) {
 	cfg := config.Config{Points: []config.PointConfig{
 		{DeviceKey: "device-a", Metric: "coil", Protocol: "modbus-tcp", Function: 1},

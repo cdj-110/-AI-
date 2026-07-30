@@ -20,6 +20,8 @@ var permissionCatalog = []struct {
 	{Key: "config.manage", Name: "管理网关配置", Group: "智能网关"},
 	{Key: "network.manage", Name: "管理 WiFi/移动网络", Group: "网络"},
 	{Key: "cloud.manage", Name: "管理云平台连接", Group: "云平台"},
+	{Key: "ai.use", Name: "使用 AI 助手", Group: "AI 助手"},
+	{Key: "ai.manage", Name: "管理 AI 模型配置", Group: "AI 助手"},
 	{Key: "maintenance.run", Name: "执行系统维护", Group: "系统维护"},
 	{Key: "users.manage", Name: "管理用户和角色", Group: "用户管理"},
 }
@@ -92,6 +94,8 @@ func (s *Server) getSecurity(writer http.ResponseWriter) {
 }
 
 func (s *Server) saveSecurity(writer http.ResponseWriter, request *http.Request) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	var payload securityPayload
 	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1024*1024)).Decode(&payload); err != nil {
 		http.Error(writer, err.Error(), http.StatusBadRequest)
@@ -225,8 +229,8 @@ func defaultedRoles(roles []config.RoleConfig) []config.RoleConfig {
 		result = append(result, role)
 	}
 	ensureRole(config.RoleConfig{RoleKey: "admin", Name: "管理员", Description: "拥有网关全部配置和维护权限", Permissions: []string{"*"}, BuiltIn: true})
-	ensureRole(config.RoleConfig{RoleKey: "operator", Name: "运维人员", Description: "可查看状态并维护网关、网络和云平台配置", Permissions: []string{"status.view", "config.view", "config.manage", "network.manage", "cloud.manage", "maintenance.run"}, BuiltIn: true})
-	ensureRole(config.RoleConfig{RoleKey: "viewer", Name: "只读用户", Description: "可查看智能网关运行态", Permissions: []string{"config.view"}, BuiltIn: true})
+	ensureRole(config.RoleConfig{RoleKey: "operator", Name: "运维人员", Description: "可查看状态并维护网关、网络、云平台和 AI 配置", Permissions: []string{"status.view", "config.view", "config.manage", "network.manage", "cloud.manage", "ai.use", "maintenance.run"}, BuiltIn: true})
+	ensureRole(config.RoleConfig{RoleKey: "viewer", Name: "只读用户", Description: "可查看智能网关运行态", Permissions: []string{"status.view", "config.view"}, BuiltIn: true})
 	return result
 }
 

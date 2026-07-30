@@ -23,7 +23,7 @@
 mkdir -p /userdata/weikong/bin /userdata/weikong/config /userdata/weikong/data
 ```
 
-将 `weikong-gateway-linux-armv7` 上传为 `/userdata/weikong/bin/weikong-gateway`，将 `config.eg100.example.json` 上传为 `/userdata/weikong/config/config.local.json`，然后执行：
+从 `gateway-artifacts/go/EG100/current` 选择当前 EG100 程序或发布包，将其中的网关程序上传为 `/userdata/weikong/bin/weikong-gateway`；将 `apps/gateway-go/config.eg100.example.json` 上传为 `/userdata/weikong/config/config.local.json`，然后执行：
 
 ```sh
 chmod 755 /userdata/weikong/bin/weikong-gateway
@@ -110,3 +110,50 @@ chmod 755 /etc/init.d/S99weikong-gateway
 3. 持久配置写入 `/etc/network/interfaces.d/<interface>`。
 
 修改当前管理网口的 IP 会中断当前浏览器和 SSH 连接，需使用新 IP 重新连接。建议先在 `eth1` 上验证配置，再调整 `eth0`。
+
+## 8. 看门狗与进程监督
+
+EG100 提供 `/dev/watchdog`。生产运行采用两层恢复机制：
+
+1. 网关可执行文件以 `-supervise` 模式启动父监督进程。
+2. 父进程检查子进程和 `http://127.0.0.1:8088/api/healthz`，异常时优先重启子进程。
+3. 连续恢复失败达到阈值后写入安全模式文件；启用硬件看门狗时停止喂狗，由硬件复位整机。
+4. 下次启动检测到安全模式文件后，不再启用硬件看门狗和自动重启，保留 SSH 排障能力。
+
+推荐配置：
+
+```json
+"watchdog": {
+  "enabled": true,
+  "hardwareEnabled": false,
+  "device": "/dev/watchdog",
+  "hardwareTimeoutSeconds": 90,
+  "feedIntervalSeconds": 10,
+  "healthCheckSeconds": 5,
+  "healthTimeoutSeconds": 3,
+  "startupGraceSeconds": 45,
+  "failureThreshold": 4,
+  "restartLimit": 3,
+  "restartWindowSeconds": 300,
+  "safeModeFile": "/userdata/weikong/data/watchdog-safe-mode"
+}
+```
+
+首次部署必须保持 `hardwareEnabled: false`，先验证软件监督：
+
+```sh
+/etc/init.d/S99weikong-gateway status
+cat /var/run/weikong-gateway.pid
+wget -qO- http://127.0.0.1:8088/api/healthz
+```
+
+确认软件监督、维护重启和升级流程稳定后，才能在现场测试机开启硬件看门狗。开启前至少验证：正常停机不会复位、升级期间不会误复位、杀死子进程可自动恢复、连续失败会进入安全模式。
+
+排除故障并确认新版本可用后，清除安全模式标记再重启监督器：
+
+```sh
+rm -f /userdata/weikong/data/watchdog-safe-mode
+/etc/init.d/S99weikong-gateway restart
+```
+
+MQTT 离线、单个采集点错误或从站超时属于业务故障，不应触发整机复位。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ type Manager struct {
 	mu            sync.RWMutex
 	cfg           config.Config
 	state         *state.Store
+	lanes         map[string]CollectionLane
+	laneOrder     []string
 	retryAfter    map[string]time.Time
 	lastCollected map[string]time.Time
 	lastWritten   map[string]time.Time
@@ -35,15 +38,19 @@ type CollectionLane struct {
 }
 
 func NewManager(cfg config.Config, store *state.Store) *Manager {
-	return &Manager{cfg: cfg, state: store, retryAfter: map[string]time.Time{}, lastCollected: map[string]time.Time{}, lastWritten: map[string]time.Time{}}
+	lanes, order := buildCollectionLanes(cfg)
+	return &Manager{cfg: cfg, state: store, lanes: lanes, laneOrder: order, retryAfter: map[string]time.Time{}, lastCollected: map[string]time.Time{}, lastWritten: map[string]time.Time{}}
 }
 
 func (m *Manager) UpdateConfig(cfg config.Config) {
 	collector.CloseRTUConnections()
 	collector.CloseIEC104Connections()
+	collector.CloseIEC61850Connections()
+	collector.CloseIEC61850GOOSEConnections()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cfg = cfg
+	m.lanes, m.laneOrder = buildCollectionLanes(cfg)
 	m.retryAfter = map[string]time.Time{}
 	m.lastCollected = map[string]time.Time{}
 	m.lastWritten = map[string]time.Time{}
@@ -106,49 +113,99 @@ func findWritablePoint(cfg config.Config, deviceKey, metric string) (config.Poin
 func (m *Manager) CollectionLanes() []CollectionLane {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	fallback := m.cfg.CollectInterval()
-	lanes := map[string]*CollectionLane{}
-	var order []string
-	for _, point := range m.cfg.Points {
-		if point.DeviceKey == "" || point.Metric == "" {
-			continue
-		}
-		key := collectionLaneKey(point)
-		lane := lanes[key]
-		if lane == nil {
-			lane = &CollectionLane{
-				Key:       key,
-				DeviceKey: point.DeviceKey,
-				Channel:   collectionLaneChannel(point),
-			}
-			lanes[key] = lane
-			order = append(order, key)
-		}
-		lane.Points = append(lane.Points, point)
-		interval := pointCollectInterval(point, fallback)
-		if lane.Interval <= 0 || interval < lane.Interval {
-			lane.Interval = interval
-		}
-	}
-	result := make([]CollectionLane, 0, len(order))
-	for _, key := range order {
-		result = append(result, *lanes[key])
+	result := make([]CollectionLane, 0, len(m.laneOrder))
+	for _, key := range m.laneOrder {
+		result = append(result, m.lanes[key])
 	}
 	return result
 }
 
-func (m *Manager) CollectLane(ctx context.Context, laneKey string, force bool) map[string]map[string]interface{} {
-	m.mu.RLock()
-	fallback := m.cfg.CollectInterval()
-	var points []config.PointConfig
-	for _, point := range m.cfg.Points {
-		if collectionLaneKey(point) == laneKey {
-			points = append(points, point)
+func buildCollectionLanes(cfg config.Config) (map[string]CollectionLane, []string) {
+	fallback := cfg.CollectInterval()
+	type laneBuild struct {
+		lane       CollectionLane
+		start      int
+		last       int
+		contiguous bool
+	}
+	lanes := map[string]*laneBuild{}
+	var order []string
+	for pointIndex, point := range cfg.Points {
+		if point.DeviceKey == "" || point.Metric == "" {
+			continue
+		}
+		key := collectionLaneKey(point)
+		build := lanes[key]
+		if build == nil {
+			build = &laneBuild{
+				lane: CollectionLane{
+					Key:       key,
+					DeviceKey: point.DeviceKey,
+					Channel:   collectionLaneChannel(point),
+				},
+				start: pointIndex, last: pointIndex, contiguous: true,
+			}
+			lanes[key] = build
+			order = append(order, key)
+		} else {
+			if pointIndex != build.last+1 {
+				build.contiguous = false
+			}
+			build.last = pointIndex
+		}
+		interval := pointCollectInterval(point, fallback)
+		if build.lane.Interval <= 0 || interval < build.lane.Interval {
+			build.lane.Interval = interval
 		}
 	}
-	interval := collectionLaneInterval(points, fallback)
+	result := make(map[string]CollectionLane, len(order))
+	for _, key := range order {
+		build := lanes[key]
+		lane := build.lane
+		if build.contiguous {
+			lane.Points = cfg.Points[build.start : build.last+1]
+		} else {
+			lane.Points = make([]config.PointConfig, 0, build.last-build.start+1)
+			for _, point := range cfg.Points {
+				if collectionLaneKey(point) == key {
+					lane.Points = append(lane.Points, point)
+				}
+			}
+		}
+		configuredInterval := lane.Interval
+		lane.Interval = protectedLargeLaneInterval(len(lane.Points), lane.Interval)
+		if lane.Interval != configuredInterval {
+			log.Printf("large collection lane protected key=%s points=%d configured=%s effective=%s", lane.Key, len(lane.Points), configuredInterval, lane.Interval)
+		}
+		result[key] = lane
+	}
+	return result, order
+}
+
+const largeLanePointsPerSecond = 50000
+
+func protectedLargeLaneInterval(pointCount int, configured time.Duration) time.Duration {
+	if pointCount <= largeLanePointsPerSecond {
+		return configured
+	}
+	minimum := time.Duration(float64(pointCount) / float64(largeLanePointsPerSecond) * float64(time.Second))
+	if minimum < time.Second {
+		minimum = time.Second
+	}
+	if configured <= 0 || configured < minimum {
+		return minimum
+	}
+	return configured
+}
+
+func (m *Manager) CollectLane(ctx context.Context, laneKey string, force bool) map[string]map[string]interface{} {
+	m.mu.RLock()
+	lane, ok := m.lanes[laneKey]
 	m.mu.RUnlock()
-	return m.collectPointSet(ctx, points, interval, force)
+	if !ok {
+		return nil
+	}
+	return m.collectPointSet(ctx, lane.Points, lane.Interval, force)
 }
 
 func (m *Manager) collect(ctx context.Context, force bool) map[string]map[string]interface{} {
@@ -171,24 +228,28 @@ func (m *Manager) collectPointSet(ctx context.Context, allPoints []config.PointC
 	defer cancel()
 
 	grouped := make(map[string]map[string]interface{})
-	for _, point := range collectPoints(collectCtx, points) {
-		if m.wasWrittenAfter(point.Point, now) {
+	for _, result := range collectPoints(collectCtx, points) {
+		if result.Index < 0 || result.Index >= len(points) {
 			continue
 		}
-		if point.Err != nil {
-			if errors.Is(point.Err, collector.ErrCollectionDeferred) {
+		point := points[result.Index]
+		if m.wasWrittenAfter(point, now) {
+			continue
+		}
+		if result.Err != nil {
+			if errors.Is(result.Err, collector.ErrCollectionDeferred) {
 				continue
 			}
-			m.state.SetPointError(point.Point, point.Err)
-			m.markRetryLater(point.Point, now)
+			m.state.SetPointError(point, result.Err)
+			m.markRetryLater(point, now)
 			continue
 		}
-		m.markCollected(point.Point, now)
-		m.state.SetPointValue(point.Value.DeviceKey, point.Value.Metric, point.Value.Value)
-		if grouped[point.Value.DeviceKey] == nil {
-			grouped[point.Value.DeviceKey] = map[string]interface{}{}
+		m.markCollected(point, now)
+		m.state.SetPointValue(result.Value.DeviceKey, result.Value.Metric, result.Value.Value)
+		if grouped[result.Value.DeviceKey] == nil {
+			grouped[result.Value.DeviceKey] = map[string]interface{}{}
 		}
-		grouped[point.Value.DeviceKey][point.Value.Metric] = point.Value.Value
+		grouped[result.Value.DeviceKey][result.Value.Metric] = result.Value.Value
 	}
 	return grouped
 }
@@ -241,11 +302,29 @@ func collectionLaneInterval(points []config.PointConfig, fallback time.Duration)
 func (m *Manager) duePoints(points []config.PointConfig, now time.Time, fallbackInterval time.Duration) []config.PointConfig {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var due []config.PointConfig
+	dueCount := 0
 	for _, point := range points {
 		key := pointKey(point)
 		next, ok := m.retryAfter[key]
 		if ok && now.Before(next) {
+			continue
+		}
+		interval := pointCollectInterval(point, fallbackInterval)
+		if last, ok := m.lastCollected[key]; ok && now.Add(dueTolerance(interval)).Sub(last) < interval {
+			continue
+		}
+		dueCount++
+	}
+	if dueCount == len(points) {
+		return points
+	}
+	if dueCount == 0 {
+		return nil
+	}
+	due := make([]config.PointConfig, 0, dueCount)
+	for _, point := range points {
+		key := pointKey(point)
+		if next, ok := m.retryAfter[key]; ok && now.Before(next) {
 			continue
 		}
 		interval := pointCollectInterval(point, fallbackInterval)
@@ -276,6 +355,19 @@ func pointKey(point config.PointConfig) string {
 }
 
 func orderPointsForCollection(points []config.PointConfig) []config.PointConfig {
+	lastPriority := -1
+	orderedAlready := true
+	for _, point := range points {
+		priority := collectProtocolPriority(point.Protocol)
+		if priority < lastPriority {
+			orderedAlready = false
+			break
+		}
+		lastPriority = priority
+	}
+	if orderedAlready {
+		return points
+	}
 	ordered := append([]config.PointConfig(nil), points...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return collectProtocolPriority(ordered[i].Protocol) < collectProtocolPriority(ordered[j].Protocol)
@@ -295,12 +387,20 @@ func collectProtocolPriority(protocol string) int {
 		return 3
 	case "iec61850":
 		return 4
+	case "iec61850-goose":
+		return 4
 	default:
 		return 5
 	}
 }
 
 func deviceReconnectDelay(point config.PointConfig, devices []config.DeviceConfig) time.Duration {
+	if point.Protocol == "iec61850-goose" {
+		// A GOOSE subscription is persistent and receives asynchronously.
+		// Retrying it like a disconnected TCP device delays the first visible
+		// value by the device's usual 30-second reconnect interval.
+		return 500 * time.Millisecond
+	}
 	seconds := 30
 	for _, device := range devices {
 		if device.DeviceKey == point.DeviceKey {
@@ -328,13 +428,7 @@ func dueTolerance(interval time.Duration) time.Duration {
 }
 
 func pointCollectInterval(point config.PointConfig, fallback time.Duration) time.Duration {
-	if point.CollectIntervalSeconds <= 0 {
-		if fallback > 0 {
-			return fallback
-		}
-		return 5 * time.Second
-	}
-	return time.Duration(point.CollectIntervalSeconds) * time.Second
+	return point.CollectInterval(fallback)
 }
 
 func maxPointCollectInterval(points []config.PointConfig, fallback time.Duration) time.Duration {
@@ -351,8 +445,18 @@ func maxPointCollectInterval(points []config.PointConfig, fallback time.Duration
 }
 
 func collectTimeout(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 5 * time.Second
+	}
 	if interval <= time.Second {
-		return 950 * time.Millisecond
+		timeout := interval - interval/10
+		// Collection frequency and request timeout are separate concerns. A
+		// 100ms schedule must not turn normal 100-200ms device responses into
+		// false communication failures.
+		if timeout < 250*time.Millisecond {
+			return 250 * time.Millisecond
+		}
+		return timeout
 	}
 	timeout := interval - 250*time.Millisecond
 	if timeout < time.Second {
@@ -362,7 +466,7 @@ func collectTimeout(interval time.Duration) time.Duration {
 }
 
 type collectResult struct {
-	Point config.PointConfig
+	Index int
 	Value model.PointValue
 	Err   error
 }
@@ -394,7 +498,7 @@ func collectPoints(ctx context.Context, points []config.PointConfig) []collectRe
 		pointCopy := point
 		tasks = append(tasks, collectionTask{indexes: []int{pointIndex}, run: func() []collectResult {
 			value, err := ReadPoint(ctx, pointCopy)
-			return []collectResult{{Point: pointCopy, Value: value, Err: err}}
+			return []collectResult{{Index: pointIndex, Value: value, Err: err}}
 		}})
 	}
 	for _, key := range modbusOrder {
@@ -422,7 +526,7 @@ func collectPoints(ctx context.Context, points []config.PointConfig) []collectRe
 			case <-ctx.Done():
 				items := make([]collectResult, 0, len(task.indexes))
 				for _, index := range task.indexes {
-					items = append(items, collectResult{Point: points[index], Err: ctx.Err()})
+					items = append(items, collectResult{Index: index, Err: ctx.Err()})
 				}
 				resultsCh <- items
 			}
@@ -470,11 +574,48 @@ func collectSerializedModbusPoints(ctx context.Context, indexes []int, points []
 			results = append(results, collectRegisterBatches(ctx, functionIndexes, points)...)
 			continue
 		}
-		for _, index := range functionIndexes {
-			point := points[index]
-			value, err := ReadPoint(ctx, point)
-			results = append(results, collectResult{Point: point, Value: value, Err: err})
+		results = append(results, collectBitBatches(ctx, functionIndexes, points)...)
+	}
+	return results
+}
+
+func collectBitBatches(ctx context.Context, indexes []int, points []config.PointConfig) []collectResult {
+	sort.Slice(indexes, func(i, j int) bool { return points[indexes[i]].Register < points[indexes[j]].Register })
+	const maxBatchBits uint16 = 2000
+	var results []collectResult
+	for start := 0; start < len(indexes); {
+		end := start + 1
+		rangeStart := points[indexes[start]].Register
+		rangeEnd := rangeStart + 1
+		for end < len(indexes) {
+			nextEnd := points[indexes[end]].Register + 1
+			if nextEnd-rangeStart > maxBatchBits {
+				break
+			}
+			rangeEnd = nextEnd
+			end++
 		}
+		batchIndexes := indexes[start:end]
+		raw, err := readRegisterRange(ctx, points[batchIndexes[0]], rangeStart, rangeEnd-rangeStart)
+		if err != nil {
+			for _, index := range batchIndexes {
+				results = append(results, collectResult{Index: index, Err: err})
+			}
+			start = end
+			continue
+		}
+		for _, index := range batchIndexes {
+			point := points[index]
+			bitOffset := int(point.Register - rangeStart)
+			byteOffset := bitOffset / 8
+			if byteOffset >= len(raw) {
+				results = append(results, collectResult{Index: index, Err: fmt.Errorf("batched bit response too short for address %d", point.Register)})
+				continue
+			}
+			value := raw[byteOffset]&(1<<uint(bitOffset%8)) != 0
+			results = append(results, collectResult{Index: index, Value: model.PointValue{DeviceKey: point.DeviceKey, Metric: point.Metric, Value: value}})
+		}
+		start = end
 	}
 	return results
 }
@@ -533,7 +674,7 @@ func collectRegisterBatches(ctx context.Context, indexes []int, points []config.
 		raw, err := readRegisterRange(ctx, points[batchIndexes[0]], rangeStart, quantity)
 		if err != nil {
 			for _, index := range batchIndexes {
-				results = append(results, collectResult{Point: points[index], Err: err})
+				results = append(results, collectResult{Index: index, Err: err})
 			}
 			start = end
 			continue
@@ -544,16 +685,16 @@ func collectRegisterBatches(ctx context.Context, indexes []int, points []config.
 			offset := int(point.Register-rangeStart) * 2
 			length := int(point.Quantity) * 2
 			if offset < 0 || offset+length > len(raw) {
-				results = append(results, collectResult{Point: point, Err: fmt.Errorf("batched response too short for register %d", point.Register)})
+				results = append(results, collectResult{Index: index, Err: fmt.Errorf("batched response too short for register %d", point.Register)})
 				continue
 			}
 			value, err := mapper.Decode(point, raw[offset:offset+length])
 			if err != nil {
-				results = append(results, collectResult{Point: point, Err: err})
+				results = append(results, collectResult{Index: index, Err: err})
 				continue
 			}
 			results = append(results, collectResult{
-				Point: point,
+				Index: index,
 				Value: model.PointValue{DeviceKey: point.DeviceKey, Metric: point.Metric, Value: value},
 			})
 		}

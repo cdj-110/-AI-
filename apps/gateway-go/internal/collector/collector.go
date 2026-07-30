@@ -38,6 +38,8 @@ func New(protocol string) (Collector, error) {
 		return IEC104{}, nil
 	case "opcua":
 		return OPCUA{}, nil
+	case "iec61850-goose":
+		return IEC61850GOOSE{}, nil
 	default:
 		if collector, ok := newOptionalCollector(protocol); ok {
 			return collector, nil

@@ -1,8 +1,13 @@
 package cloud
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -14,6 +19,7 @@ import (
 
 var attributeTemplateTokenPattern = regexp.MustCompile(`\{attribute(?:\.[^{}\s",:\[\]]+){0,2}\}`)
 var exactAttributePointTemplatePattern = regexp.MustCompile(`^\{attribute\.[^{}\s",:\[\]]+\.([^{}\s",:\[\]]+)\}$`)
+var ErrNoManualPayload = errors.New("manual payload has no matching values")
 
 type Client struct {
 	name            string
@@ -27,6 +33,7 @@ type Client struct {
 	payloadTemplate string
 	subscribeTopic  string
 	mqtt            mqtt.Client
+	setupErr        error
 }
 
 type RemoteConfigCommand struct {
@@ -53,6 +60,9 @@ type MQTTOptions struct {
 	PayloadTemplate string
 	SubscribeTopic  string
 	Manual          bool
+	CAFile          string
+	CertFile        string
+	KeyFile         string
 }
 
 func NewManualMQTT(cfg config.Config, onConnectionChanged func(bool)) *Client {
@@ -72,6 +82,9 @@ func NewManualMQTTChannel(name string, gatewayKey string, channel config.MQTTCon
 		PayloadTemplate: channel.PayloadTemplate,
 		SubscribeTopic:  channel.SubscribeTopic,
 		Manual:          true,
+		CAFile:          channel.CAFile,
+		CertFile:        channel.CertFile,
+		KeyFile:         channel.KeyFile,
 	}, onConnectionChanged)
 }
 
@@ -98,11 +111,17 @@ func NewMQTT(opts MQTTOptions, onConnectionChanged func(bool)) *Client {
 		SetResumeSubs(true).
 		SetConnectTimeout(5 * time.Second).
 		SetKeepAlive(30 * time.Second)
+	tlsConfig, tlsErr := mqttTLSConfig(opts)
+	if tlsErr == nil && tlsConfig != nil {
+		clientOptions.SetTLSConfig(tlsConfig)
+	}
 	if onConnectionChanged != nil {
 		clientOptions.SetOnConnectHandler(func(mqtt.Client) {
+			log.Printf("mqtt connected channel=%s", opts.Name)
 			onConnectionChanged(true)
 		})
-		clientOptions.SetConnectionLostHandler(func(_ mqtt.Client, _ error) {
+		clientOptions.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+			log.Printf("mqtt connection lost channel=%s: %v", opts.Name, err)
 			onConnectionChanged(false)
 		})
 	}
@@ -119,7 +138,40 @@ func NewMQTT(opts MQTTOptions, onConnectionChanged func(bool)) *Client {
 		payloadTemplate: opts.PayloadTemplate,
 		subscribeTopic:  opts.SubscribeTopic,
 		mqtt:            mqtt.NewClient(clientOptions),
+		setupErr:        tlsErr,
 	}
+}
+
+func mqttTLSConfig(opts MQTTOptions) (*tls.Config, error) {
+	if opts.CAFile == "" && opts.CertFile == "" && opts.KeyFile == "" {
+		return nil, nil
+	}
+	config := &tls.Config{MinVersion: tls.VersionTLS12}
+	if opts.CAFile != "" {
+		raw, err := os.ReadFile(opts.CAFile)
+		if err != nil {
+			return nil, err
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if !roots.AppendCertsFromPEM(raw) {
+			return nil, fmt.Errorf("mqtt CA file contains no certificates")
+		}
+		config.RootCAs = roots
+	}
+	if opts.CertFile != "" || opts.KeyFile != "" {
+		if opts.CertFile == "" || opts.KeyFile == "" {
+			return nil, fmt.Errorf("mqtt client certificate and key must be configured together")
+		}
+		certificate, err := tls.LoadX509KeyPair(opts.CertFile, opts.KeyFile)
+		if err != nil {
+			return nil, err
+		}
+		config.Certificates = []tls.Certificate{certificate}
+	}
+	return config, nil
 }
 
 func (c *Client) SubscribeAttributes(handler func(topic string, payload []byte)) error {
@@ -205,6 +257,9 @@ func (c *Client) IsManual() bool {
 }
 
 func (c *Client) Connect() error {
+	if c.setupErr != nil {
+		return fmt.Errorf("mqtt TLS configuration: %w", c.setupErr)
+	}
 	token := c.mqtt.Connect()
 	if token.WaitTimeout(6*time.Second) && token.Error() != nil {
 		return token.Error()
@@ -268,7 +323,7 @@ func (c *Client) PublishAttributes(metrics map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
-	return c.publish(c.RenderManualTopic(), payload)
+	return c.publishQoS(c.RenderManualTopic(), payload, 0)
 }
 
 func (c *Client) PublishManual(grouped map[string]map[string]interface{}) error {
@@ -283,9 +338,13 @@ func (c *Client) PublishManual(grouped map[string]map[string]interface{}) error 
 		return err
 	}
 	if len(payload) == 0 {
-		return nil
+		return ErrNoManualPayload
 	}
-	return c.publish(c.RenderManualTopic(), payload)
+	// Manual MQTT channels carry high-rate latest-value telemetry. QoS 0
+	// avoids retaining messages and waiting for PUBACK on lightweight or
+	// non-compliant brokers. Platform control/config traffic still uses the
+	// default QoS 1 path below.
+	return c.publishQoS(c.RenderManualTopic(), payload, 0)
 }
 
 func (c *Client) RenderManualTopic() string {
@@ -355,6 +414,10 @@ func sanitizeMetrics(metrics map[string]interface{}) map[string]interface{} {
 }
 
 func (c *Client) publish(topic string, payload interface{}) error {
+	return c.publishQoS(topic, payload, 1)
+}
+
+func (c *Client) publishQoS(topic string, payload interface{}, qos byte) error {
 	if !c.mqtt.IsConnected() {
 		return fmt.Errorf("mqtt is not connected")
 	}
@@ -362,7 +425,7 @@ func (c *Client) publish(topic string, payload interface{}) error {
 	if err != nil {
 		return err
 	}
-	token := c.mqtt.Publish(topic, 1, false, raw)
+	token := c.mqtt.Publish(topic, qos, false, raw)
 	if !token.WaitTimeout(2 * time.Second) {
 		return fmt.Errorf("mqtt publish timeout")
 	}

@@ -20,6 +20,7 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -27,6 +28,112 @@ import (
 )
 
 var iec61850FCNamePattern = regexp.MustCompile(`^(.+)\[([A-Z]{2})\]$`)
+
+type iec61850ClientSession struct {
+	mu      sync.Mutex
+	address string
+	conn    C.IedConnection
+}
+
+var iec61850ClientSessions = struct {
+	sync.Mutex
+	items map[string]*iec61850ClientSession
+}{items: map[string]*iec61850ClientSession{}}
+
+func getIEC61850ClientSession(address string) *iec61850ClientSession {
+	iec61850ClientSessions.Lock()
+	defer iec61850ClientSessions.Unlock()
+	session := iec61850ClientSessions.items[address]
+	if session == nil {
+		session = &iec61850ClientSession{address: address}
+		iec61850ClientSessions.items[address] = session
+	}
+	return session
+}
+
+func (s *iec61850ClientSession) closeLocked() {
+	if s.conn == nil {
+		return
+	}
+	C.IedConnection_close(s.conn)
+	C.IedConnection_destroy(s.conn)
+	s.conn = nil
+}
+
+func (s *iec61850ClientSession) connectLocked() error {
+	if s.conn != nil {
+		return nil
+	}
+	host, port := splitIEC61850HostPort(s.address)
+	cHost := C.CString(host)
+	defer C.free(unsafe.Pointer(cHost))
+	conn := C.IedConnection_create()
+	C.IedConnection_setConnectTimeout(conn, 3000)
+	C.IedConnection_setRequestTimeout(conn, 3000)
+	var err C.IedClientError
+	C.IedConnection_connect(conn, &err, cHost, C.int(port))
+	if err != C.IED_ERROR_OK {
+		C.IedConnection_destroy(conn)
+		return iec61850ClientError("MMS association", s.address, err)
+	}
+	s.conn = conn
+	return nil
+}
+
+// CloseIEC61850Connections closes persistent MMS client associations. It is
+// called before a configuration reload so changed addresses never reuse an old
+// connection.
+func CloseIEC61850Connections() {
+	iec61850ClientSessions.Lock()
+	sessions := make([]*iec61850ClientSession, 0, len(iec61850ClientSessions.items))
+	for _, session := range iec61850ClientSessions.items {
+		sessions = append(sessions, session)
+	}
+	iec61850ClientSessions.items = map[string]*iec61850ClientSession{}
+	iec61850ClientSessions.Unlock()
+	for _, session := range sessions {
+		session.mu.Lock()
+		session.closeLocked()
+		session.mu.Unlock()
+	}
+}
+
+func iec61850ClientError(operation, target string, err C.IedClientError) error {
+	message := C.GoString(C.IedClientError_toString(err))
+	if message == "" {
+		message = "unknown error"
+	}
+	return fmt.Errorf("IEC61850 %s %s failed: %s (error %d)", operation, target, message, int(err))
+}
+
+func testIEC61850Association(ctx context.Context, address string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	host, port := splitIEC61850HostPort(address)
+	cHost := C.CString(host)
+	defer C.free(unsafe.Pointer(cHost))
+	conn := C.IedConnection_create()
+	defer C.IedConnection_destroy(conn)
+	C.IedConnection_setConnectTimeout(conn, 3000)
+	C.IedConnection_setRequestTimeout(conn, 3000)
+	var err C.IedClientError
+	C.IedConnection_connect(conn, &err, cHost, C.int(port))
+	if err != C.IED_ERROR_OK {
+		return iec61850ClientError("MMS association", address, err)
+	}
+	defer C.IedConnection_close(conn)
+	devices := C.IedConnection_getServerDirectory(conn, &err, false)
+	if devices != nil {
+		C.LinkedList_destroy(devices)
+	}
+	if err != C.IED_ERROR_OK {
+		return iec61850ClientError("model directory read", address, err)
+	}
+	return nil
+}
 
 func BrowseIEC61850Nodes(ctx context.Context, address string, parentRef string, recursive bool) ([]IEC61850BrowseNode, error) {
 	select {
@@ -45,7 +152,7 @@ func BrowseIEC61850Nodes(ctx context.Context, address string, parentRef string, 
 	var err C.IedClientError
 	C.IedConnection_connect(conn, &err, cHost, C.int(port))
 	if err != C.IED_ERROR_OK {
-		return nil, fmt.Errorf("IEC61850 MMS connect failed %s: error %d", address, int(err))
+		return nil, iec61850ClientError("MMS association", address, err)
 	}
 	defer C.IedConnection_close(conn)
 
@@ -419,38 +526,39 @@ func readIEC61850Point(ctx context.Context, point config.PointConfig, objectRef 
 	default:
 	}
 	address := iec61850Address(point.Address)
-	host, port := splitIEC61850HostPort(address)
-	cHost := C.CString(host)
-	defer C.free(unsafe.Pointer(cHost))
 	cRef := C.CString(objectRef)
 	defer C.free(unsafe.Pointer(cRef))
-
-	conn := C.IedConnection_create()
-	defer C.IedConnection_destroy(conn)
-	C.IedConnection_setConnectTimeout(conn, 3000)
-	C.IedConnection_setRequestTimeout(conn, 3000)
-
-	var err C.IedClientError
-	C.IedConnection_connect(conn, &err, cHost, C.int(port))
-	if err != C.IED_ERROR_OK {
-		return nil, fmt.Errorf("IEC61850 MMS connect failed %s: error %d", address, int(err))
+	session := getIEC61850ClientSession(address)
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := session.connectLocked(); err != nil {
+			return nil, err
+		}
+		var err C.IedClientError
+		value := C.IedConnection_readObject(session.conn, &err, cRef, iec61850FunctionalConstraint(fc))
+		if err == C.IED_ERROR_OK && value != nil {
+			if C.MmsValue_getType(value) == C.MMS_DATA_ACCESS_ERROR {
+				accessError := int(C.MmsValue_getDataAccessError(value))
+				C.MmsValue_delete(value)
+				return nil, fmt.Errorf("IEC61850 read %s[%s] data access error %d", objectRef, fc, accessError)
+			}
+			converted := iec61850MmsValue(value)
+			C.MmsValue_delete(value)
+			return applyIEC61850Scale(point, converted), nil
+		}
+		if value != nil {
+			C.MmsValue_delete(value)
+		}
+		session.closeLocked()
+		if attempt == 1 {
+			if err != C.IED_ERROR_OK {
+				return nil, iec61850ClientError("read "+objectRef+"["+fc+"]", address, err)
+			}
+			return nil, fmt.Errorf("IEC61850 read %s[%s] returned empty value", objectRef, fc)
+		}
 	}
-	defer C.IedConnection_close(conn)
-
-	value := C.IedConnection_readObject(conn, &err, cRef, iec61850FunctionalConstraint(fc))
-	if err != C.IED_ERROR_OK {
-		return nil, fmt.Errorf("IEC61850 read %s[%s] failed: error %d", objectRef, fc, int(err))
-	}
-	if value == nil {
-		return nil, fmt.Errorf("IEC61850 read %s[%s] returned empty value", objectRef, fc)
-	}
-	defer C.MmsValue_delete(value)
-	if C.MmsValue_getType(value) == C.MMS_DATA_ACCESS_ERROR {
-		return nil, fmt.Errorf("IEC61850 read %s[%s] data access error %d", objectRef, fc, int(C.MmsValue_getDataAccessError(value)))
-	}
-
-	converted := iec61850MmsValue(value)
-	return applyIEC61850Scale(point, converted), nil
+	return nil, fmt.Errorf("IEC61850 read %s[%s] failed", objectRef, fc)
 }
 
 func ProbeIEC61850ObjectRefs(ctx context.Context, address string, refs []IEC61850ProbeResult) ([]IEC61850ProbeResult, error) {
@@ -472,7 +580,7 @@ func ProbeIEC61850ObjectRefs(ctx context.Context, address string, refs []IEC6185
 	var err C.IedClientError
 	C.IedConnection_connect(conn, &err, cHost, C.int(port))
 	if err != C.IED_ERROR_OK {
-		return nil, fmt.Errorf("IEC61850 MMS connect failed %s: error %d", address, int(err))
+		return nil, iec61850ClientError("MMS association", address, err)
 	}
 	defer C.IedConnection_close(conn)
 

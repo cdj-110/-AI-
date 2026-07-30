@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 	"weikong-iot-platform/apps/gateway-go/internal/state"
@@ -28,13 +29,13 @@ func TestProtectedRoutesRequireLogin(t *testing.T) {
 	}
 }
 
-func TestStatusIsPublic(t *testing.T) {
+func TestStatusRequiresLogin(t *testing.T) {
 	server := newAuthTestServer()
 
 	response := httptest.NewRecorder()
 	server.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/status", nil))
-	if response.Code != http.StatusOK {
-		t.Fatalf("status response = %d, want %d", response.Code, http.StatusOK)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status response = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
 }
 
@@ -46,7 +47,9 @@ func TestPointStatusReturnsLatestInternalValue(t *testing.T) {
 	server := New(configForAuthTest(), store, nil, "", nil)
 
 	response := httptest.NewRecorder()
-	server.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/point-status", nil))
+	request := httptest.NewRequest(http.MethodGet, "/api/point-status", nil)
+	authenticateTestRequest(server, request)
+	server.routes().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("point status response = %d, want %d", response.Code, http.StatusOK)
 	}
@@ -71,7 +74,9 @@ func TestPointStatusFiltersCurrentDevice(t *testing.T) {
 	server := New(configForAuthTest(), store, nil, "", nil)
 
 	response := httptest.NewRecorder()
-	server.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/point-status?deviceKey=d2", nil))
+	request := httptest.NewRequest(http.MethodGet, "/api/point-status?deviceKey=d2", nil)
+	authenticateTestRequest(server, request)
+	server.routes().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("point status response = %d, want %d", response.Code, http.StatusOK)
 	}
@@ -120,6 +125,33 @@ func TestInvalidCredentialsAreRejected(t *testing.T) {
 	}
 }
 
+func TestNewPasswordHashesUseBcrypt(t *testing.T) {
+	hash, err := hashPassword("123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(hash, "$2") || !verifyPasswordHash(hash, "123456") || verifyPasswordHash(hash, "wrong") {
+		t.Fatalf("unexpected bcrypt verification result for %q", hash)
+	}
+}
+
+func TestLoginIsRateLimitedAfterRepeatedFailures(t *testing.T) {
+	server := newAuthTestServer()
+	for attempt := 1; attempt <= maxLoginFailures+1; attempt++ {
+		form := url.Values{"username": {"admin"}, "password": {"wrong"}}
+		request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+		server.routes().ServeHTTP(response, request)
+		if attempt <= maxLoginFailures && response.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d", attempt, response.Code)
+		}
+		if attempt > maxLoginFailures && response.Code != http.StatusTooManyRequests {
+			t.Fatalf("rate-limited attempt status = %d, want %d", response.Code, http.StatusTooManyRequests)
+		}
+	}
+}
+
 func configForAuthTest() config.ListenerConfig {
 	return config.ListenerConfig{Enabled: true, Listen: "127.0.0.1:8088"}
 }
@@ -128,4 +160,12 @@ func newAuthTestServer() *Server {
 	cfg := config.Config{GatewayKey: "test-gateway"}
 	cfg.ApplyDefaults()
 	return New(configForAuthTest(), state.New(cfg), nil, "", nil)
+}
+
+func authenticateTestRequest(server *Server, request *http.Request) {
+	auth := server.authState()
+	auth.mu.Lock()
+	auth.sessions["test-session"] = sessionInfo{ExpiresAt: time.Now().Add(time.Hour), Username: "admin", RoleKey: "admin", Permissions: []string{"*"}}
+	auth.mu.Unlock()
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "test-session"})
 }

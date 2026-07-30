@@ -37,6 +37,26 @@ func TestStoreChangeSubscriptionCoalescesWithoutBlockingCollector(t *testing.T) 
 	}
 }
 
+func TestPollingPointBecomesStale(t *testing.T) {
+	cfg := config.Config{Points: []config.PointConfig{{DeviceKey: "d1", Metric: "p1", Protocol: "modbus-tcp", CollectIntervalSeconds: 1}}}
+	store := New(cfg)
+	store.SetPointValue("d1", "p1", 1)
+	store.mu.Lock()
+	point := store.points[pointKey("d1", "p1")]
+	old := time.Now().Add(-time.Minute)
+	point.UpdatedAt = &old
+	store.points[pointKey("d1", "p1")] = point
+	store.mu.Unlock()
+	points := store.PointStatuses()
+	if len(points) != 1 || !points[0].Stale {
+		t.Fatalf("point should be stale: %#v", points)
+	}
+	snapshot := store.Snapshot()
+	if snapshot.StaleCount != 1 || snapshot.HealthyCount != 0 {
+		t.Fatalf("unexpected stale counts: %#v", snapshot)
+	}
+}
+
 func TestMQTTChannelsRemainIndependent(t *testing.T) {
 	enabled := true
 	cfg := config.Config{

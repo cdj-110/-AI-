@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>实时报文监控</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter,"Microsoft YaHei",system-ui,sans-serif; background:#070b14; color:#e5edf8; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-width:960px; background:radial-gradient(circle at 20% -10%,#17223b 0,transparent 34%),#070b14; }
+    button,input,select { font:inherit; }
+    .shell { display:grid; grid-template-rows:auto auto auto minmax(0,1fr); height:100vh; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:16px 22px; border-bottom:1px solid #202a3c; background:rgba(9,14,25,.92); }
+    .title { display:flex; align-items:center; gap:12px; }
+    .title-mark { display:grid; place-items:center; width:36px; height:36px; border:1px solid #285aa8; border-radius:10px; background:#10294f; color:#63a7ff; font-family:Consolas,monospace; font-weight:800; }
+    h1 { margin:0; font-size:18px; }
+    .subtitle { margin-top:4px; color:#8290a8; font-size:12px; }
+    .status { display:flex; align-items:center; gap:8px; color:#9aa8bc; font-size:12px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:#f59e0b; box-shadow:0 0 0 4px rgba(245,158,11,.12); }
+    .status.online .dot { background:#22c55e; box-shadow:0 0 0 4px rgba(34,197,94,.13); }
+    .toolbar { display:grid; grid-template-columns:auto auto auto minmax(180px,1fr) auto auto auto auto; gap:10px; align-items:end; padding:12px 22px; border-bottom:1px solid #202a3c; background:#0c1220; }
+    label { display:grid; gap:5px; color:#78879f; font-size:11px; }
+    input,select,button { height:34px; border:1px solid #2a3549; border-radius:7px; color:#dbe7f7; background:#111a2a; outline:none; }
+    input,select { padding:0 10px; }
+    input:focus,select:focus { border-color:#3b82f6; box-shadow:0 0 0 2px rgba(59,130,246,.14); }
+    .device-context { display:flex; align-items:center; gap:8px; height:34px; min-width:190px; padding:0 11px; border:1px solid #2a3549; border-radius:7px; color:#eef5ff; background:#111a2a; }
+    .device-context strong { overflow:hidden; max-width:150px; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
+    .device-context span { color:#71819a; font-family:Consolas,"SFMono-Regular",monospace; font-size:11px; }
+    button { padding:0 13px; cursor:pointer; }
+    button:hover { border-color:#4c6486; background:#172235; }
+    button.primary { border-color:#2563eb; background:#2563eb; color:#fff; }
+    button.active { border-color:#2563eb; color:#9cc4ff; background:#102a52; }
+    .console { overflow:auto; padding:10px 14px 24px; font-family:Consolas,"SFMono-Regular",monospace; font-size:12px; scrollbar-color:#334155 #0a0f1b; }
+    .empty { display:grid; min-height:55vh; place-items:center; color:#65738a; font-family:Inter,"Microsoft YaHei",sans-serif; }
+    .console-head,.frame { display:grid; grid-template-columns:104px 46px 92px minmax(150px,230px) minmax(180px,1fr) 72px; gap:10px; align-items:start; }
+    .console-head { position:sticky; z-index:2; top:0; padding:7px 10px; border-bottom:1px solid #2b374c; color:#66758c; background:#0a101c; font-family:Inter,"Microsoft YaHei",sans-serif; font-size:11px; }
+    .frame { padding:8px 10px; border-bottom:1px solid #182235; line-height:1.55; }
+    .frame:hover { background:#0e1727; }
+    .time { color:#78879f; }
+    .direction { font-weight:800; }
+    .direction.tx { color:#60a5fa; }
+    .direction.rx { color:#4ade80; }
+    .protocol { color:#c4b5fd; }
+    .summary { overflow:hidden; color:#cad5e5; text-overflow:ellipsis; white-space:nowrap; }
+    .hex { grid-column:1/-1; display:flex; gap:12px; padding-left:144px; color:#eaf2ff; word-break:break-all; }
+    .hex .bytes { letter-spacing:.8px; }
+    .hex .ascii { min-width:140px; color:#63738c; letter-spacing:1px; }
+    .frame.error { background:rgba(127,29,29,.13); }
+    .frame.error .summary { color:#fca5a5; }
+    .frame.session-end { background:rgba(30,64,110,.10); }
+    .frame.session-end .summary { color:#7f93ad; }
+    .count { color:#8fa0b7; text-align:right; }
+    .stats { display:flex; gap:14px; color:#8290a8; font-size:12px; }
+    .stats strong { color:#dbeafe; }
+    .sniff-only,.sniff-panel { display:none; }
+    .sniff-panel.visible { display:block; padding:12px 22px; border-bottom:1px solid #243149; background:#0a1120; }
+    .sniff-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:10px; }
+    .sniff-head strong { font-size:13px; }
+    .sniff-head span { color:#8190a8; font-size:11px; }
+    .sniff-summary { display:flex; gap:8px; }
+    .sniff-chip { padding:4px 8px; border:1px solid #2b3b55; border-radius:999px; color:#9fb0c8; background:#101a2b; font-size:11px; }
+    .sniff-chip.ok { border-color:#1d6549; color:#6ee7a8; background:#0c2b20; }
+    .sniff-chip.bad { border-color:#7f3e45; color:#fda4af; background:#35151b; }
+    .sniff-sources { display:grid; gap:8px; max-height:250px; overflow:auto; }
+    .sniff-source { display:grid; grid-template-columns:minmax(170px,1.2fr) minmax(210px,1.6fr) minmax(150px,1fr) minmax(180px,1.3fr); gap:10px; padding:10px 12px; border:1px solid #26344b; border-radius:8px; background:#0d1626; font-size:11px; }
+    .sniff-source.match { border-color:#1f6a4c; box-shadow:inset 3px 0 #22c55e; }
+    .sniff-source b,.sniff-source code,.sniff-source small { display:block; }
+    .sniff-source b { margin-bottom:3px; color:#e7f0fc; font-size:12px; }
+    .sniff-source code { overflow:hidden; color:#8ec5ff; text-overflow:ellipsis; white-space:nowrap; }
+    .sniff-source small { margin-top:3px; color:#78889f; }
+    .sniff-warning { color:#fda4af!important; }
+    .sniff-values { overflow:hidden; color:#d4deed; text-overflow:ellipsis; white-space:nowrap; }
+    .sniff-empty { padding:14px; border:1px dashed #293850; border-radius:8px; color:#718199; text-align:center; font-size:12px; }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="title"><span class="title-mark">&lt;/&gt;</span><div><h1>实时报文监控</h1><div id="device-label" class="subtitle">当前设备 · 内存实时模式，不写入磁盘</div></div></div>
+      <div style="display:flex;align-items:center;gap:20px"><div class="stats"><span>显示 <strong id="shown-count">0</strong></span><span>接收 <strong id="rx-count">0</strong></span><span>发送 <strong id="tx-count">0</strong></span></div><div id="stream-status" class="status"><span class="dot"></span><span>正在连接</span></div></div>
+    </header>
+    <div class="toolbar">
+      <label>设备<div class="device-context" title="当前页面仅显示该设备的报文"><strong id="device-name-control">当前设备</strong><span id="device-key-control"></span></div></label>
+      <label>方向<select id="direction-filter" onchange="render()"><option value="">全部方向</option><option value="tx">发送 TX</option><option value="rx">接收 RX</option></select></label>
+      <label>显示条数<select id="limit-filter" onchange="trimFrames();render()"><option>200</option><option selected>500</option><option>1000</option></select></label>
+      <label>搜索<input id="search-filter" type="search" placeholder="设备、地址、摘要或十六进制" oninput="render()" /></label>
+      <button id="sniff-button" class="sniff-only primary" onclick="toggleSniff()">开始捕获</button>
+      <button id="pause-button" onclick="togglePause()">暂停</button>
+      <button onclick="clearFrames()">清空画面</button>
+      <button class="primary" onclick="window.close()">关闭页面</button>
+    </div>
+    <section id="sniff-panel" class="sniff-panel">
+      <div class="sniff-head"><div><strong>GOOSE 发布源诊断</strong><span id="sniff-state">尚未开始捕获</span></div><div id="sniff-summary" class="sniff-summary"></div></div>
+      <div id="sniff-sources" class="sniff-sources"><div class="sniff-empty">点击“开始捕获”，扫描当前网卡上的 GOOSE 发布源</div></div>
+    </section>
+    <section id="console" class="console"><div class="empty">等待设备产生通信报文…</div></section>
+  </main>
+  <script>
+    const query = new URLSearchParams(location.search);
+    const deviceKey = query.get('deviceKey') || '';
+    const deviceName = query.get('deviceName') || deviceKey || '全部设备';
+    const protocol = query.get('protocol') || '';
+    const gooseMode = protocol === 'iec61850-goose' || protocol === 'iec61850-goose-publisher';
+    let frames = [];
+    let paused = false;
+    let pending = [];
+    let stream;
+    let sniffTimer;
+    let sniffSnapshot = null;
+    document.getElementById('device-label').textContent = deviceName + (deviceKey ? ' · ' + deviceKey : '') + ' · 内存实时模式，不写入磁盘';
+    document.getElementById('device-name-control').textContent = deviceName;
+    document.getElementById('device-key-control').textContent = deviceKey;
+    if (gooseMode) {
+      document.getElementById('sniff-button').style.display = 'block';
+      document.getElementById('sniff-panel').classList.add('visible');
+    }
+
+    const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    function spacedHex(value) { return String(value || '').match(/.{1,2}/g)?.join(' ') || '—'; }
+    function ascii(value) {
+      const pairs = String(value || '').match(/.{1,2}/g) || [];
+      return pairs.map((pair) => { const code = parseInt(pair,16); return code >= 32 && code <= 126 ? String.fromCharCode(code) : '.'; }).join('');
+    }
+    function formatFrameTime(value) {
+      const date = new Date(value);
+      const pad = (number, width=2) => String(number).padStart(width,'0');
+      return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds()) + '.' + pad(date.getMilliseconds(),3);
+    }
+    function isNormalSessionEnd(frame) { return String(frame.error || '').trim().toUpperCase() === 'EOF'; }
+    function frameClass(frame) { return isNormalSessionEnd(frame) ? 'session-end' : (frame.error ? 'error' : ''); }
+    function frameDescription(frame) { return isNormalSessionEnd(frame) ? '本次通信结束，将自动重连' : (frame.error || frame.summary); }
+    function filteredFrames() {
+      const direction = document.getElementById('direction-filter').value;
+      const search = document.getElementById('search-filter').value.trim().toLowerCase();
+      return frames.filter((frame) => (!direction || frame.direction === direction) && (!search || [frame.deviceKey,frame.address,frame.summary,frame.hex,frame.error].some((value) => String(value || '').toLowerCase().includes(search))));
+    }
+    function render() {
+      const consoleNode = document.getElementById('console');
+      const visible = filteredFrames();
+      document.getElementById('shown-count').textContent = visible.length;
+      document.getElementById('rx-count').textContent = frames.filter((frame) => frame.direction === 'rx').length;
+      document.getElementById('tx-count').textContent = frames.filter((frame) => frame.direction === 'tx').length;
+      if (!visible.length) { consoleNode.innerHTML = '<div class="empty">等待设备产生通信报文…</div>'; return; }
+      consoleNode.innerHTML = '<div class="console-head"><span>时间</span><span>方向</span><span>协议</span><span>连接地址</span><span>报文说明</span><span style="text-align:right">长度</span></div>' + visible.map((frame) => '<article class="frame ' + frameClass(frame) + '">' +
+        '<span class="time">' + formatFrameTime(frame.time) + '</span>' +
+        '<span class="direction ' + escapeHTML(frame.direction) + '">' + escapeHTML(String(frame.direction || '').toUpperCase()) + '</span>' +
+        '<span class="protocol">' + escapeHTML(frame.protocol) + '</span>' +
+        '<span>' + escapeHTML(frame.address || frame.deviceKey || '-') + '</span>' +
+        '<span class="summary" title="' + escapeHTML(frameDescription(frame)) + '">' + escapeHTML(frameDescription(frame)) + '</span>' +
+        '<span class="count">' + Number(frame.length || 0) + ' B</span>' +
+        '<div class="hex"><span class="bytes">' + escapeHTML(spacedHex(frame.hex)) + '</span><span class="ascii">' + escapeHTML(ascii(frame.hex)) + '</span></div></article>').join('');
+      consoleNode.scrollTop = consoleNode.scrollHeight;
+    }
+    function trimFrames() { const limit = Number(document.getElementById('limit-filter').value || 500); if (frames.length > limit) frames = frames.slice(-limit); }
+    function appendFrame(frame) { if (paused) pending.push(frame); else { frames.push(frame); trimFrames(); render(); } }
+    function togglePause() { paused = !paused; const button = document.getElementById('pause-button'); button.textContent = paused ? '继续' : '暂停'; button.classList.toggle('active',paused); if (!paused && pending.length) { frames.push(...pending); pending=[]; trimFrames(); render(); } }
+    function clearFrames() { frames=[]; pending=[]; render(); }
+    function formatSniffValue(value) {
+      if (!value) return '—';
+      const rendered = value.value && typeof value.value === 'object' ? JSON.stringify(value.value) : String(value.value ?? '—');
+      return String(value.kind || '') + ': ' + rendered;
+    }
+    function renderSniff() {
+      if (!gooseMode || !sniffSnapshot) return;
+      const active = !!sniffSnapshot.active;
+      const sources = sniffSnapshot.sources || [];
+      const matched = sources.filter((source) => source.matched).length;
+      const button = document.getElementById('sniff-button');
+      button.textContent = active ? '停止捕获' : '重新捕获';
+      button.classList.toggle('active',active);
+      document.getElementById('sniff-state').textContent = active
+        ? '正在捕获 · ' + sniffSnapshot.interfaceName + ' · 到 ' + new Date(sniffSnapshot.expiresAt).toLocaleTimeString()
+        : (sniffSnapshot.error ? '捕获失败：' + sniffSnapshot.error : '捕获已停止');
+      document.getElementById('sniff-summary').innerHTML =
+        '<span class="sniff-chip">报文 ' + Number(sniffSnapshot.frameCount || 0) + '</span>' +
+        '<span class="sniff-chip">发布源 ' + sources.length + '</span>' +
+        '<span class="sniff-chip ' + (matched ? 'ok' : 'bad') + '">配置匹配 ' + matched + '</span>';
+      const target = document.getElementById('sniff-sources');
+      if (!sources.length) {
+        target.innerHTML = '<div class="sniff-empty">' + (active ? '正在监听，尚未发现 GOOSE 报文…' : '本次未捕获到 GOOSE 报文，请检查网卡、交换机或发布端') + '</div>';
+        return;
+      }
+      target.innerHTML = sources.map((source) => {
+        const warnings = source.warnings || [];
+        const values = (source.values || []).slice(0,20).map(formatSniffValue).join('，');
+        return '<article class="sniff-source ' + (source.matched ? 'match' : '') + '">' +
+          '<div><b>' + escapeHTML(source.sourceMac) + ' → ' + escapeHTML(source.destinationMac) + '</b><small>APPID 0x' + Number(source.appId || 0).toString(16).toUpperCase().padStart(4,'0') + ' · ' + (source.tagged ? 'VLAN ' + source.vlanId + ' / PCP ' + source.vlanPriority : '无 VLAN') + '</small></div>' +
+          '<div><code title="' + escapeHTML(source.goCbRef) + '">' + escapeHTML(source.goCbRef || '—') + '</code><small title="' + escapeHTML(source.dataSetRef) + '">' + escapeHTML(source.dataSetRef || '—') + '</small></div>' +
+          '<div><b>stNum ' + source.stateNumber + ' · sqNum ' + source.sequenceNumber + '</b><small>' + Number(source.framesPerSecond || 0).toFixed(1) + ' 帧/秒 · 共 ' + source.frameCount + ' 帧 · TTL ' + source.timeAllowedToLiveMilliseconds + 'ms</small></div>' +
+          '<div><div class="sniff-values" title="' + escapeHTML(values) + '">' + escapeHTML(values || '无数据成员') + '</div><small class="' + (warnings.length ? 'sniff-warning' : '') + '">' + escapeHTML(warnings.length ? warnings.join('；') : (source.matched ? '与当前配置一致' : '未匹配当前配置')) + '</small></div></article>';
+      }).join('');
+    }
+    async function loadSniff() {
+      if (!gooseMode) return;
+      const response = await fetch('/api/goose/sniff');
+      if (!response.ok) throw new Error(await response.text());
+      sniffSnapshot = await response.json();
+      renderSniff();
+      if (!sniffSnapshot.active && sniffTimer) { clearInterval(sniffTimer); sniffTimer = undefined; }
+    }
+    async function toggleSniff() {
+      try {
+        const active = !!sniffSnapshot?.active;
+        const response = await fetch('/api/goose/sniff',{
+          method: active ? 'DELETE' : 'POST',
+          headers: active ? {} : {'Content-Type':'application/json'},
+          body: active ? undefined : JSON.stringify({deviceKey,durationSeconds:60})
+        });
+        if (!response.ok) throw new Error((await response.text()).trim());
+        sniffSnapshot = await response.json();
+        renderSniff();
+        if (sniffSnapshot.active && !sniffTimer) sniffTimer = setInterval(() => loadSniff().catch(showSniffError),1000);
+      } catch (error) { showSniffError(error); }
+    }
+    function showSniffError(error) {
+      document.getElementById('sniff-state').textContent = '捕获失败：' + (error?.message || error);
+    }
+    async function loadInitial() {
+      const params = new URLSearchParams({limit:'500'}); if (deviceKey) params.set('deviceKey',deviceKey);
+      const response = await fetch('/api/packets?' + params); if (!response.ok) throw new Error(await response.text());
+      const data = await response.json(); frames = (data.frames || []).reverse(); trimFrames(); render();
+    }
+    function connect() {
+      const params = new URLSearchParams(); if (deviceKey) params.set('deviceKey',deviceKey);
+      stream = new EventSource('/api/packets/stream?' + params);
+      stream.onopen = () => { const status=document.getElementById('stream-status'); status.classList.add('online'); status.querySelector('span:last-child').textContent='实时连接'; };
+      stream.onmessage = (event) => appendFrame(JSON.parse(event.data));
+      stream.onerror = () => { const status=document.getElementById('stream-status'); status.classList.remove('online'); status.querySelector('span:last-child').textContent='正在重连'; };
+    }
+    loadInitial().catch((error) => { document.getElementById('console').innerHTML='<div class="empty">加载失败：'+escapeHTML(error.message)+'</div>'; }).finally(connect);
+    if (gooseMode) loadSniff().catch(showSniffError);
+    addEventListener('beforeunload',() => { stream?.close(); if (sniffTimer) clearInterval(sniffTimer); });
+  </script>
+</body>
+</html>

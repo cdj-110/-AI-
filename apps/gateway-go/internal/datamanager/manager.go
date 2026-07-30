@@ -146,6 +146,7 @@ func (m *Manager) run(ctx context.Context, ready chan<- struct{}) {
 	ticker := time.NewTicker(diffFlushInterval)
 	defer ticker.Stop()
 	dirty := false
+	lastFreshnessCheck := time.Now()
 	for {
 		select {
 		case _, open := <-updates:
@@ -154,16 +155,23 @@ func (m *Manager) run(ctx context.Context, ready chan<- struct{}) {
 			}
 			dirty = true
 		case <-ticker.C:
-			if !dirty {
+			freshnessDue := time.Since(lastFreshnessCheck) >= time.Second
+			if !dirty && !freshnessDue {
 				continue
 			}
 			dirty = false
 			nextPointRevision, nextStatusRevision := m.store.Revisions()
-			if nextPointRevision != pointRevision {
+			if nextPointRevision != pointRevision || freshnessDue {
 				currentPoints := m.store.PointStatuses()
 				pointDiff, nextPoints := changedPoints(previousPoints, currentPoints)
 				if pointDiff.Replace || len(pointDiff.Points) > 0 {
 					m.broadcast("points.diff", pointDiff)
+					if freshnessDue {
+						current := m.store.Snapshot()
+						current.Points = nil
+						current.Errors = nil
+						m.broadcast("gateway.status", current)
+					}
 				}
 				currentDevices := deviceStatuses(currentPoints)
 				deviceDiff, nextDevices := changedDevices(previousDevices, currentDevices)
@@ -179,6 +187,9 @@ func (m *Manager) run(ctx context.Context, ready chan<- struct{}) {
 					previousCommunication = communication
 				}
 				pointRevision = nextPointRevision
+				if freshnessDue {
+					lastFreshnessCheck = time.Now()
+				}
 			}
 			if nextStatusRevision != statusRevision {
 				current := m.store.Snapshot()
@@ -278,11 +289,11 @@ func deviceStatuses(points []state.PointStatus) []DeviceStatus {
 	for _, key := range keys {
 		status := "connecting"
 		for _, point := range grouped[key] {
-			if point.Error == "" && point.UpdatedAt != nil {
+			if point.Error == "" && point.UpdatedAt != nil && !point.Stale {
 				status = "online"
 				break
 			}
-			if point.Error != "" {
+			if point.Error != "" || point.Stale {
 				status = "offline"
 			}
 		}
@@ -338,11 +349,11 @@ func linkStatuses(points []state.PointStatus) []LinkStatus {
 		items := grouped[key]
 		status := "connecting"
 		for _, point := range items {
-			if point.Error == "" && point.UpdatedAt != nil {
+			if point.Error == "" && point.UpdatedAt != nil && !point.Stale {
 				status = "online"
 				break
 			}
-			if point.Error != "" {
+			if point.Error != "" || point.Stale {
 				status = "offline"
 			}
 		}

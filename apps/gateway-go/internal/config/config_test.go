@@ -3,8 +3,28 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestMillisecondCollectionIntervalTakesPrecedence(t *testing.T) {
+	cfg := Config{
+		CollectIntervalSeconds: 5,
+		Channels: []ChannelConfig{{
+			CollectIntervalSeconds:      1,
+			CollectIntervalMilliseconds: 100,
+		}},
+	}
+	if got := cfg.CollectInterval(); got != 100*time.Millisecond {
+		t.Fatalf("CollectInterval() = %s, want 100ms", got)
+	}
+	point := PointConfig{CollectIntervalSeconds: 1, CollectIntervalMilliseconds: 80}
+	if got := point.CollectInterval(time.Second); got != 80*time.Millisecond {
+		t.Fatalf("PointConfig.CollectInterval() = %s, want 80ms", got)
+	}
+}
 
 func TestParseDeviceConnectionOverridesStalePointConnection(t *testing.T) {
 	raw := []byte(`{
@@ -108,6 +128,38 @@ func TestSaveReplacesConfigWithValidJSON(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary config files remain: %v", matches)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+		t.Fatalf("config permissions = %o, want no group/other access", info.Mode().Perm())
+	}
+}
+
+func TestRedactAndPreserveSecrets(t *testing.T) {
+	current := Config{
+		GatewayKey: "gw",
+		MQTT:       MQTTConfig{Password: "mqtt-secret"},
+		WiFi:       WiFiConfig{Password: "wifi-secret"},
+		Security:   SecurityConfig{Users: []UserConfig{{Username: "admin", PasswordHash: "$2a$hash", Enabled: true}}},
+		Devices:    []DeviceConfig{{DeviceKey: "opc", Protocol: "opcua", Address: "opc.tcp://127.0.0.1:4840", Password: "opc-secret", Points: []PointConfig{{Metric: "p", NodeID: "ns=1;i=1"}}}},
+	}
+	redacted := RedactSecrets(current)
+	if redacted.MQTT.Password != "***" || redacted.WiFi.Password != "***" || redacted.Devices[0].Password != "***" || len(redacted.Security.Users) != 0 {
+		t.Fatalf("secrets were not redacted: %#v", redacted)
+	}
+	PreserveMaskedSecrets(current, &redacted)
+	if redacted.MQTT.Password != "mqtt-secret" || redacted.WiFi.Password != "wifi-secret" || redacted.Devices[0].Password != "opc-secret" || len(redacted.Security.Users) != 1 {
+		t.Fatalf("masked secrets were not restored: %#v", redacted)
+	}
+}
+
+func TestValidateChecksNestedProtocolFields(t *testing.T) {
+	_, err := Parse([]byte(`{"gatewayKey":"gw","mqtt":{"enabled":false},"devices":[{"deviceKey":"d1","protocol":"opcua","address":"opc.tcp://127.0.0.1:4840","points":[{"metric":"temperature"}]}]}`))
+	if err == nil || !strings.Contains(err.Error(), "nodeId") {
+		t.Fatalf("expected nested OPC UA nodeId validation, got %v", err)
 	}
 }
 
@@ -366,8 +418,26 @@ func TestIEC104ExpandedAddressesAndLegacyFallback(t *testing.T) {
 func TestIEC104ConfiguredAllOffIsPreserved(t *testing.T) {
 	options := IEC104Config{Configured: true}
 	options.ApplyDefaults()
-	if options.GeneralInterrogationOnStart || options.ClockSyncOnStart || options.CounterInterrogationOnStart || options.ClockSyncIntervalSeconds != 0 {
+	if options.AcquisitionMode != "auto" || options.GeneralInterrogationOnStart || options.ClockSyncOnStart || options.CounterInterrogationOnStart || options.ClockSyncIntervalSeconds != 0 {
 		t.Fatalf("explicit all-off IEC104 options were changed: %#v", options)
+	}
+}
+
+func TestIEC104AcquisitionModeDefaultsAndLegacyPeriodicMigration(t *testing.T) {
+	automatic := IEC104Config{}
+	automatic.ApplyDefaults()
+	if automatic.AcquisitionMode != "auto" || !automatic.GeneralInterrogationOnStart || automatic.GeneralInterrogationIntervalSeconds != 0 || automatic.ClockSyncOnStart || automatic.CounterInterrogationOnStart {
+		t.Fatalf("automatic IEC104 defaults = %#v", automatic)
+	}
+	legacyPeriodic := IEC104Config{Configured: true, GeneralInterrogationIntervalSeconds: 30}
+	legacyPeriodic.ApplyDefaults()
+	if legacyPeriodic.AcquisitionMode != "periodic" || legacyPeriodic.GeneralInterrogationIntervalSeconds != 30 {
+		t.Fatalf("legacy periodic IEC104 config was not preserved: %#v", legacyPeriodic)
+	}
+	explicitPeriodic := IEC104Config{Configured: true, AcquisitionMode: "periodic"}
+	explicitPeriodic.ApplyDefaults()
+	if explicitPeriodic.GeneralInterrogationIntervalSeconds != 5 {
+		t.Fatalf("periodic IEC104 default interval = %d, want 5", explicitPeriodic.GeneralInterrogationIntervalSeconds)
 	}
 }
 
@@ -390,6 +460,9 @@ func TestIEC104RejectsIOAOutside24BitRange(t *testing.T) {
 func TestForwardDeviceDefaultsAndEnablesServer(t *testing.T) {
 	cfg := Config{ForwardDevices: []ForwardDeviceConfig{{Protocol: "modbus-tcp-slave", Points: []ForwardPointConfig{{SourceDeviceKey: "d1", SourceMetric: "p1"}}}}}
 	cfg.ApplyDefaults()
+	if cfg.ForwardSlave.IEC61850Listen != "0.0.0.0:102" {
+		t.Fatalf("IEC61850 MMS default listen = %q, want standard port 102", cfg.ForwardSlave.IEC61850Listen)
+	}
 	device := cfg.ForwardDevices[0]
 	if !cfg.ForwardSlave.Enabled || device.DeviceKey == "" || device.UnitID != 1 {
 		t.Fatalf("forward defaults not applied: %#v", device)
@@ -412,6 +485,34 @@ func TestForwardOnlyChannelDoesNotGetCollectionProtocol(t *testing.T) {
 	channel := cfg.Channels[0]
 	if channel.Role != "forward" || channel.Protocol != "none" || channel.ForwardProtocol != "iec104-server" {
 		t.Fatalf("forward-only channel defaults = %#v", channel)
+	}
+}
+
+func TestIEC61850MMSForwardDefaultsCreateCanonicalObjectReference(t *testing.T) {
+	cfg := Config{
+		GatewayKey: "gw",
+		ForwardDevices: []ForwardDeviceConfig{{
+			Protocol: "iec61850-mms-server",
+			Points: []ForwardPointConfig{{
+				SourceDeviceKey: "source", SourceMetric: "temperature-1", DataType: "float32",
+			}, {
+				SourceDeviceKey: "source", SourceMetric: "alarm", DataType: "bool",
+			}},
+		}},
+	}
+	cfg.ApplyDefaults()
+	device := cfg.ForwardDevices[0]
+	if device.IEDName != "WEIKONG" || device.LogicalDevice != "LD1" {
+		t.Fatalf("IEC61850 MMS device defaults = %#v", device)
+	}
+	if got := device.Points[0]; got.ObjectRef != "WEIKONGLD1/GGIO1.temperature1.mag.f" || got.FC != "MX" {
+		t.Fatalf("numeric IEC61850 MMS point defaults = %#v", got)
+	}
+	if got := device.Points[1]; got.ObjectRef != "WEIKONGLD1/GGIO1.alarm.stVal" || got.FC != "ST" {
+		t.Fatalf("boolean IEC61850 MMS point defaults = %#v", got)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate IEC61850 MMS forwarding: %v", err)
 	}
 }
 
@@ -481,5 +582,31 @@ func TestNewGlobalPointMetricDuplicateIsRejected(t *testing.T) {
 	changed.Devices[1].Points = append(changed.Devices[1].Points, PointConfig{Metric: "Temperature"})
 	if err := changed.ValidateNewGlobalIdentifierDuplicates(previous); err == nil {
 		t.Fatal("new case-insensitive point metric duplicate was accepted")
+	}
+}
+
+func TestForwardAliasMayKeepSourceMetric(t *testing.T) {
+	previous := Config{Devices: []DeviceConfig{{DeviceKey: "source", Points: []PointConfig{{Metric: "temperature"}}}}}
+	changed := previous
+	changed.ForwardDevices = []ForwardDeviceConfig{{DeviceKey: "forward", Points: []ForwardPointConfig{{Metric: "temperature", SourceDeviceKey: "source", SourceMetric: "temperature"}}}}
+	if err := changed.ValidateNewGlobalIdentifierDuplicates(previous); err != nil {
+		t.Fatalf("forward alias should keep its source metric: %v", err)
+	}
+}
+
+func TestLegacyConfigIsMigratedToCurrentSchema(t *testing.T) {
+	cfg, err := Parse([]byte(`{"gatewayKey":"gw","activation":{"enabled":false},"mqtt":{"enabled":false}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("schemaVersion = %d, want %d", cfg.SchemaVersion, CurrentSchemaVersion)
+	}
+}
+
+func TestFutureConfigSchemaIsRejected(t *testing.T) {
+	_, err := Parse([]byte(`{"schemaVersion":999,"gatewayKey":"gw","activation":{"enabled":false},"mqtt":{"enabled":false}}`))
+	if err == nil || !strings.Contains(err.Error(), "unsupported config schemaVersion") {
+		t.Fatalf("error = %v, want unsupported schema error", err)
 	}
 }

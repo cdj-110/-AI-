@@ -1,5 +1,19 @@
 {
   "gatewayKey": "EG100-TEST-001",
+  "watchdog": {
+    "enabled": true,
+    "hardwareEnabled": false,
+    "device": "/dev/watchdog",
+    "hardwareTimeoutSeconds": 90,
+    "feedIntervalSeconds": 10,
+    "healthCheckSeconds": 5,
+    "healthTimeoutSeconds": 3,
+    "startupGraceSeconds": 45,
+    "failureThreshold": 4,
+    "restartLimit": 3,
+    "restartWindowSeconds": 300,
+    "safeModeFile": "/userdata/weikong/data/watchdog-safe-mode"
+  },
   "collectIntervalSeconds": 5,
   "cacheFile": "/userdata/weikong/data/gateway-spool.jsonl",
   "offlineCache": {

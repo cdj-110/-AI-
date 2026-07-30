@@ -8,19 +8,26 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"html/template"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 )
 
 const (
 	sessionCookieName = "weikong_gateway_session"
 	sessionLifetime   = 24 * time.Hour
+	loginWindow       = 5 * time.Minute
+	loginBlockTime    = 5 * time.Minute
+	maxLoginFailures  = 5
 )
 
 type authManager struct {
@@ -28,6 +35,12 @@ type authManager struct {
 	sessions map[string]sessionInfo
 	username string
 	password string
+	attempts map[string]loginAttempt
+}
+
+type loginAttempt struct {
+	Failures     []time.Time
+	BlockedUntil time.Time
 }
 
 type sessionInfo struct {
@@ -54,7 +67,7 @@ func newAuthManager() *authManager {
 	if password == "" {
 		password = "123456"
 	}
-	return &authManager{sessions: make(map[string]sessionInfo), username: username, password: password}
+	return &authManager{sessions: make(map[string]sessionInfo), attempts: make(map[string]loginAttempt), username: username, password: password}
 }
 
 func (s *Server) authState() *authManager {
@@ -143,11 +156,21 @@ func (s *Server) login(writer http.ResponseWriter, request *http.Request) {
 	if password == "" {
 		password = request.FormValue("password")
 	}
+	if retryAfter, allowed := s.allowLogin(request, username); !allowed {
+		writer.Header().Set("Retry-After", strconv.Itoa(int(time.Until(retryAfter).Seconds())+1))
+		s.auditLogin(request, username, false, "rate limited")
+		s.renderLogin(writer, request.FormValue("next"), "登录失败次数过多，请稍后重试", http.StatusTooManyRequests)
+		return
+	}
 	loginUser, ok := s.verifyCredentials(username, password)
 	if !ok {
+		s.recordLoginResult(request, username, false)
+		s.auditLogin(request, username, false, "invalid credentials")
 		s.renderLogin(writer, request.FormValue("next"), "账号或密码错误", http.StatusUnauthorized)
 		return
 	}
+	s.recordLoginResult(request, username, true)
+	s.auditLogin(request, username, true, "")
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		http.Error(writer, "create session failed", http.StatusInternalServerError)
@@ -227,16 +250,16 @@ func (s *Server) loadSecurity() (config.SecurityConfig, error) {
 }
 
 func hashPassword(password string) (string, error) {
-	saltBytes := make([]byte, 16)
-	if _, err := rand.Read(saltBytes); err != nil {
-		return "", err
-	}
-	salt := hex.EncodeToString(saltBytes)
-	sum := sha256.Sum256([]byte(salt + ":" + password))
-	return "sha256:" + salt + ":" + hex.EncodeToString(sum[:]), nil
+	raw, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(raw), err
 }
 
 func verifyPasswordHash(hash string, password string) bool {
+	if strings.HasPrefix(hash, "$2a$") || strings.HasPrefix(hash, "$2b$") || strings.HasPrefix(hash, "$2y$") {
+		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+	}
+	// Keep legacy hashes readable during rolling upgrades. They are replaced by
+	// bcrypt the next time an administrator changes the password.
 	parts := strings.Split(hash, ":")
 	if len(parts) != 3 || parts[0] != "sha256" {
 		return false
@@ -245,6 +268,83 @@ func verifyPasswordHash(hash string, password string) bool {
 	expected := parts[2]
 	actual := hex.EncodeToString(sum[:])
 	return subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
+}
+
+func (s *Server) allowLogin(request *http.Request, username string) (time.Time, bool) {
+	auth := s.authState()
+	key := loginAttemptKey(request, username)
+	now := time.Now()
+	auth.mu.Lock()
+	defer auth.mu.Unlock()
+	attempt := auth.attempts[key]
+	if attempt.BlockedUntil.After(now) {
+		return attempt.BlockedUntil, false
+	}
+	attempt.Failures = recentFailures(attempt.Failures, now)
+	auth.attempts[key] = attempt
+	return time.Time{}, true
+}
+
+func (s *Server) recordLoginResult(request *http.Request, username string, success bool) {
+	auth := s.authState()
+	key := loginAttemptKey(request, username)
+	now := time.Now()
+	auth.mu.Lock()
+	defer auth.mu.Unlock()
+	if success {
+		delete(auth.attempts, key)
+		return
+	}
+	attempt := auth.attempts[key]
+	attempt.Failures = append(recentFailures(attempt.Failures, now), now)
+	if len(attempt.Failures) >= maxLoginFailures {
+		attempt.BlockedUntil = now.Add(loginBlockTime)
+		attempt.Failures = nil
+	}
+	auth.attempts[key] = attempt
+}
+
+func recentFailures(items []time.Time, now time.Time) []time.Time {
+	cutoff := now.Add(-loginWindow)
+	kept := items[:0]
+	for _, item := range items {
+		if item.After(cutoff) {
+			kept = append(kept, item)
+		}
+	}
+	return kept
+}
+
+func loginAttemptKey(request *http.Request, username string) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil {
+		host = request.RemoteAddr
+	}
+	return strings.ToLower(strings.TrimSpace(username)) + "@" + host
+}
+
+func (s *Server) auditLogin(request *http.Request, username string, success bool, reason string) {
+	result := "success"
+	if !success {
+		result = "failed"
+	}
+	message := "login " + result + " user=" + strings.TrimSpace(username) + " remote=" + request.RemoteAddr
+	if reason != "" {
+		message += " reason=" + reason
+	}
+	log.Print(message)
+	if s.data != nil {
+		level := "INFO"
+		if !success {
+			level = "WARN"
+		}
+		s.data.PublishLog(level, message)
+	}
+	status := http.StatusOK
+	if !success {
+		status = http.StatusUnauthorized
+	}
+	s.appendAudit(auditEvent{Username: strings.TrimSpace(username), RemoteIP: requestRemoteIP(request), Method: request.Method, Path: "/login", Status: status, Result: result, Detail: reason})
 }
 
 func (s *Server) logout(writer http.ResponseWriter, request *http.Request) {

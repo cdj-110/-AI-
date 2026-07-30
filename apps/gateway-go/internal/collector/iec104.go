@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -13,9 +14,17 @@ import (
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 	"weikong-iot-platform/apps/gateway-go/internal/model"
+	"weikong-iot-platform/apps/gateway-go/internal/packetmonitor"
 )
 
 type IEC104 struct{}
+
+const iec104TestFrameInterval = 5 * time.Second
+const iec104InitialDataGrace = 5 * time.Second
+const iec104ShortInterrogationSession = 3 * time.Second
+const iec104AckWindow = 3
+const iec104AckDelay = 2 * time.Second
+const iec104ReconnectGrace = 30 * time.Second
 
 type IEC104ConnectionResult struct {
 	Address       string
@@ -23,16 +32,24 @@ type IEC104ConnectionResult struct {
 }
 
 type iec104Client struct {
-	conn         net.Conn
-	mu           sync.Mutex
-	values       map[uint32]interface{}
-	valueUpdated map[uint32]time.Time
-	sendSeq      uint16
-	recvSeq      uint16
-	commonAS     uint16
-	options      config.IEC104Config
-	done         chan struct{}
-	updated      time.Time
+	conn                     net.Conn
+	deviceKey                string
+	address                  string
+	mu                       sync.Mutex
+	values                   map[uint32]interface{}
+	valueUpdated             map[uint32]time.Time
+	sendSeq                  uint16
+	recvSeq                  uint16
+	commonAS                 uint16
+	options                  config.IEC104Config
+	done                     chan struct{}
+	updated                  time.Time
+	connectedAt              time.Time
+	skipInitialInterrogation bool
+	initialInterrogationSent bool
+	unackedRecv              int
+	ackTimer                 *time.Timer
+	poolKey                  string
 }
 
 type iec104ConnectCall struct {
@@ -44,12 +61,18 @@ type iec104ConnectCall struct {
 
 var iec104Pool = struct {
 	sync.Mutex
-	items      map[string]*iec104Client
-	connecting map[string]*iec104ConnectCall
-	generation uint64
+	items              map[string]*iec104Client
+	connecting         map[string]*iec104ConnectCall
+	preferSpontaneous  map[string]bool
+	forceInterrogation map[string]bool
+	lastSuccess        map[string]time.Time
+	generation         uint64
 }{
-	items:      map[string]*iec104Client{},
-	connecting: map[string]*iec104ConnectCall{},
+	items:              map[string]*iec104Client{},
+	connecting:         map[string]*iec104ConnectCall{},
+	preferSpontaneous:  map[string]bool{},
+	forceInterrogation: map[string]bool{},
+	lastSuccess:        map[string]time.Time{},
 }
 
 func (IEC104) ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error) {
@@ -73,7 +96,10 @@ func (IEC104) ReadPoint(ctx context.Context, point config.PointConfig) (model.Po
 		}
 		select {
 		case <-ctx.Done():
-			return model.PointValue{}, ctx.Err()
+			if client.options.AcquisitionMode == "auto" && time.Since(client.connectedAt) < iec104InitialDataGrace {
+				return model.PointValue{}, fmt.Errorf("%w: IEC104 自动兼容模式正在等待首个自发报文", ErrCollectionDeferred)
+			}
+			return model.PointValue{}, fmt.Errorf("IEC104 IOA %d 暂无数据，请确认设备是否响应总召或自发上送该点位", ioa)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -93,6 +119,7 @@ func TestIEC104Connection(ctx context.Context, address string, commonAS uint16) 
 	defer conn.Close()
 	client := &iec104Client{
 		conn:         conn,
+		address:      address,
 		values:       map[uint32]interface{}{},
 		valueUpdated: map[uint32]time.Time{},
 		commonAS:     commonAS,
@@ -130,6 +157,7 @@ func getIEC104Client(ctx context.Context, point config.PointConfig) (result *iec
 		commonAS = 1
 	}
 	key := fmt.Sprintf("%s#%d", address, commonAS)
+	options := iec104Options(point)
 
 	iec104Pool.Lock()
 	if client := iec104Pool.items[key]; client != nil {
@@ -149,6 +177,8 @@ func getIEC104Client(ctx context.Context, point config.PointConfig) (result *iec
 		done:       make(chan struct{}),
 		generation: iec104Pool.generation,
 	}
+	lastSuccess := iec104Pool.lastSuccess[key]
+	skipInitialInterrogation := options.AcquisitionMode == "auto" && iec104Pool.preferSpontaneous[key] && !iec104Pool.forceInterrogation[key]
 	iec104Pool.connecting[key] = call
 	iec104Pool.Unlock()
 
@@ -176,18 +206,29 @@ func getIEC104Client(ctx context.Context, point config.PointConfig) (result *iec
 
 	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
 	if err != nil {
+		if options.AcquisitionMode == "auto" && !lastSuccess.IsZero() && time.Since(lastSuccess) < iec104ReconnectGrace {
+			return nil, fmt.Errorf("%w: IEC104 正在重连 %s: %v", ErrCollectionDeferred, address, err)
+		}
 		return nil, fmt.Errorf("IEC104 连接失败 %s：%w", address, err)
 	}
 	client := &iec104Client{
-		conn:         conn,
-		values:       map[uint32]interface{}{},
-		valueUpdated: map[uint32]time.Time{},
-		commonAS:     commonAS,
-		options:      iec104Options(point),
-		done:         make(chan struct{}),
+		conn:                     conn,
+		deviceKey:                point.DeviceKey,
+		address:                  address,
+		values:                   map[uint32]interface{}{},
+		valueUpdated:             map[uint32]time.Time{},
+		commonAS:                 commonAS,
+		options:                  options,
+		done:                     make(chan struct{}),
+		connectedAt:              time.Now(),
+		skipInitialInterrogation: skipInitialInterrogation,
+		poolKey:                  key,
 	}
 	if err := client.start(); err != nil {
 		_ = conn.Close()
+		if options.AcquisitionMode == "auto" && !lastSuccess.IsZero() && time.Since(lastSuccess) < iec104ReconnectGrace {
+			return nil, fmt.Errorf("%w: IEC104 正在恢复会话: %v", ErrCollectionDeferred, err)
+		}
 		return nil, err
 	}
 	return client, nil
@@ -235,11 +276,14 @@ func iec104Address(address string) string {
 func (c *iec104Client) start() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, err := c.conn.Write([]byte{0x68, 0x04, 0x07, 0x00, 0x00, 0x00}); err != nil {
+	start := []byte{0x68, 0x04, 0x07, 0x00, 0x00, 0x00}
+	c.recordPacket("tx", start, "STARTDT 激活", nil)
+	if _, err := c.conn.Write(start); err != nil {
 		return fmt.Errorf("IEC104 STARTDT 发送失败：%w", err)
 	}
 	_ = c.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	packet, err := readIEC104Packet(c.conn)
+	c.recordPacket("rx", packet, "STARTDT 确认", err)
 	_ = c.conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return fmt.Errorf("IEC104 STARTDT 响应失败：%w", err)
@@ -295,13 +339,22 @@ func (c *iec104Client) clockSync(now time.Time) error {
 func (c *iec104Client) sendASDU(asdu []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, err := c.conn.Write(c.iFrame(asdu))
+	packet := c.iFrame(asdu)
+	c.recordPacket("tx", packet, iec104PacketSummary(packet), nil)
+	_, err := c.conn.Write(packet)
 	return err
 }
 
 func (c *iec104Client) startConfiguredCommands() {
-	if c.options.GeneralInterrogationOnStart {
-		_ = c.interrogate()
+	if c.options.AcquisitionMode == "auto" && c.skipInitialInterrogation {
+		c.recordPacket("rx", nil, "自动兼容：已转为长连接，等待设备自发上送", nil)
+	}
+	if c.options.GeneralInterrogationOnStart && !c.skipInitialInterrogation {
+		if c.interrogate() == nil {
+			c.mu.Lock()
+			c.initialInterrogationSent = true
+			c.mu.Unlock()
+		}
 	}
 	if c.options.ClockSyncOnStart {
 		_ = c.clockSync(time.Now())
@@ -309,9 +362,29 @@ func (c *iec104Client) startConfiguredCommands() {
 	if c.options.CounterInterrogationOnStart {
 		_ = c.counterInterrogate()
 	}
-	c.startPeriodicCommand(c.options.GeneralInterrogationIntervalSeconds, c.interrogate)
+	if c.options.AcquisitionMode == "periodic" {
+		c.startPeriodicCommand(c.options.GeneralInterrogationIntervalSeconds, c.interrogate)
+	}
 	c.startPeriodicCommand(c.options.ClockSyncIntervalSeconds, func() error { return c.clockSync(time.Now()) })
 	c.startPeriodicCommand(c.options.CounterInterrogationIntervalSeconds, c.counterInterrogate)
+	c.startTestFrames()
+}
+
+func (c *iec104Client) startTestFrames() {
+	go func() {
+		ticker := time.NewTicker(iec104TestFrameInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := c.sendUFrame(0x43, "TESTFR 激活"); err != nil {
+					return
+				}
+			case <-c.done:
+				return
+			}
+		}
+	}()
 }
 
 func (c *iec104Client) startPeriodicCommand(seconds int, command func() error) {
@@ -347,6 +420,12 @@ func (c *iec104Client) iFrame(asdu []byte) []byte {
 
 func (c *iec104Client) readLoop(key string) {
 	defer func() {
+		c.mu.Lock()
+		if c.ackTimer != nil {
+			c.ackTimer.Stop()
+			c.ackTimer = nil
+		}
+		c.mu.Unlock()
 		_ = c.conn.Close()
 		close(c.done)
 		iec104Pool.Lock()
@@ -358,8 +437,27 @@ func (c *iec104Client) readLoop(key string) {
 	for {
 		packet, err := readIEC104Packet(c.conn)
 		if err != nil {
+			if c.shouldPreferSpontaneous(err) {
+				iec104Pool.Lock()
+				switchToSpontaneous := !iec104Pool.forceInterrogation[key]
+				if switchToSpontaneous {
+					iec104Pool.preferSpontaneous[key] = true
+				}
+				iec104Pool.Unlock()
+				if switchToSpontaneous {
+					c.recordPacket("rx", nil, "自动兼容：检测到总召后结束会话，下次连接改为接收自发上送", nil)
+				}
+			} else if c.shouldRestoreInterrogation(err) {
+				iec104Pool.Lock()
+				delete(iec104Pool.preferSpontaneous, key)
+				iec104Pool.forceInterrogation[key] = true
+				iec104Pool.Unlock()
+				c.recordPacket("rx", nil, "自动兼容：自发会话未收到有效点位，已回退为总召方式", nil)
+			}
+			c.recordPacket("rx", nil, "接收失败", err)
 			return
 		}
+		c.recordPacket("rx", packet, iec104PacketSummary(packet), nil)
 		c.handlePacket(packet)
 	}
 }
@@ -368,11 +466,32 @@ func CloseIEC104Connections() {
 	iec104Pool.Lock()
 	items := iec104Pool.items
 	iec104Pool.items = map[string]*iec104Client{}
+	iec104Pool.preferSpontaneous = map[string]bool{}
+	iec104Pool.forceInterrogation = map[string]bool{}
+	iec104Pool.lastSuccess = map[string]time.Time{}
 	iec104Pool.generation++
 	iec104Pool.Unlock()
 	for _, client := range items {
 		_ = client.conn.Close()
 	}
+}
+
+func (c *iec104Client) shouldPreferSpontaneous(err error) bool {
+	if c.options.AcquisitionMode != "auto" || c.skipInitialInterrogation || !errors.Is(err, io.EOF) || time.Since(c.connectedAt) > iec104ShortInterrogationSession {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.initialInterrogationSent && !c.updated.IsZero()
+}
+
+func (c *iec104Client) shouldRestoreInterrogation(err error) bool {
+	if c.options.AcquisitionMode != "auto" || !c.skipInitialInterrogation || !errors.Is(err, io.EOF) || time.Since(c.connectedAt) > iec104ShortInterrogationSession {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.updated.IsZero()
 }
 
 func readIEC104Packet(reader io.Reader) ([]byte, error) {
@@ -398,17 +517,143 @@ func (c *iec104Client) handlePacket(packet []byte) {
 	if control&0x01 == 0 {
 		c.recvSeq = (binary.LittleEndian.Uint16(packet[2:4]) >> 1) + 1
 		c.handleASDU(packet[6:])
-		_ = c.sendAck()
+		c.queueAck()
+		return
 	}
+	if control == 0x43 {
+		_ = c.sendUFrame(0x83, "TESTFR 确认")
+	}
+}
+
+func (c *iec104Client) sendUFrame(control byte, summary string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	packet := []byte{0x68, 0x04, control, 0x00, 0x00, 0x00}
+	c.recordPacket("tx", packet, summary, nil)
+	_, err := c.conn.Write(packet)
+	return err
 }
 
 func (c *iec104Client) sendAck() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.sendAckLocked()
+}
+
+func (c *iec104Client) sendAckLocked() error {
 	recv := c.recvSeq << 1
 	packet := []byte{0x68, 0x04, 0x01, 0x00, byte(recv), byte(recv >> 8)}
+	c.recordPacket("tx", packet, "S帧确认", nil)
 	_, err := c.conn.Write(packet)
+	c.unackedRecv = 0
+	if c.ackTimer != nil {
+		c.ackTimer.Stop()
+		c.ackTimer = nil
+	}
 	return err
+}
+
+func (c *iec104Client) queueAck() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unackedRecv++
+	if c.unackedRecv >= iec104AckWindow {
+		_ = c.sendAckLocked()
+		return
+	}
+	if c.ackTimer == nil {
+		c.ackTimer = time.AfterFunc(iec104AckDelay, c.flushAck)
+	}
+}
+
+func (c *iec104Client) flushAck() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.unackedRecv > 0 {
+		_ = c.sendAckLocked()
+	}
+}
+
+func (c *iec104Client) recordPacket(direction string, packet []byte, summary string, err error) {
+	frame := packetmonitor.Frame{Protocol: "iec104", Direction: direction, DeviceKey: c.deviceKey, Address: c.address, Summary: summary}
+	if err != nil {
+		frame.Error = err.Error()
+	}
+	packetmonitor.Record(frame, packet)
+}
+
+func iec104PacketSummary(packet []byte) string {
+	if len(packet) < 6 {
+		return "IEC104 报文"
+	}
+	if packet[2]&0x01 == 0 && len(packet) > 7 {
+		typeID := packet[6]
+		count := packet[7] & 0x7f
+		if len(packet) >= 10 {
+			cause := binary.LittleEndian.Uint16(packet[8:10]) & 0x3f
+			return fmt.Sprintf("I帧 %s 对象数=%d 原因=%s", iec104TypeName(typeID), count, iec104CauseName(cause))
+		}
+		return fmt.Sprintf("I帧 %s 对象数=%d", iec104TypeName(typeID), count)
+	}
+	if packet[2]&0x03 == 1 {
+		return "S帧确认"
+	}
+	switch packet[2] {
+	case 0x07:
+		return "STARTDT 激活"
+	case 0x0b:
+		return "STARTDT 确认"
+	case 0x13:
+		return "STOPDT 激活"
+	case 0x23:
+		return "STOPDT 确认"
+	case 0x43:
+		return "TESTFR 激活"
+	case 0x83:
+		return "TESTFR 确认"
+	default:
+		return "U帧控制"
+	}
+}
+
+func iec104TypeName(typeID byte) string {
+	switch typeID {
+	case 1:
+		return "单点信息(M_SP_NA_1)"
+	case 3:
+		return "双点信息(M_DP_NA_1)"
+	case 9:
+		return "归一化值(M_ME_NA_1)"
+	case 11:
+		return "标度化值(M_ME_NB_1)"
+	case 13:
+		return "短浮点数(M_ME_NC_1)"
+	case 100:
+		return "总召命令(C_IC_NA_1)"
+	case 101:
+		return "电度召唤(C_CI_NA_1)"
+	case 103:
+		return "时钟同步(C_CS_NA_1)"
+	default:
+		return fmt.Sprintf("ASDU类型=%d", typeID)
+	}
+}
+
+func iec104CauseName(cause uint16) string {
+	switch cause {
+	case 3:
+		return "自发(3)"
+	case 6:
+		return "激活(6)"
+	case 7:
+		return "激活确认(7)"
+	case 10:
+		return "激活终止(10)"
+	case 20:
+		return "响应总召(20)"
+	default:
+		return fmt.Sprintf("%d", cause)
+	}
 }
 
 func (c *iec104Client) handleASDU(asdu []byte) {
@@ -455,6 +700,11 @@ func (c *iec104Client) handleASDU(asdu []byte) {
 		c.valueUpdated[ioa] = now
 		c.updated = now
 		c.mu.Unlock()
+		if c.poolKey != "" {
+			iec104Pool.Lock()
+			iec104Pool.lastSuccess[c.poolKey] = now
+			iec104Pool.Unlock()
+		}
 	}
 }
 

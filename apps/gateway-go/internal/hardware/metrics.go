@@ -14,6 +14,12 @@ type SystemMetrics struct {
 	Storage MetricValue `json:"storage"`
 }
 
+type ProcessMetrics struct {
+	MemoryBytes uint64 `json:"memoryBytes"`
+	DiskBytes   uint64 `json:"diskBytes"`
+	DiskPath    string `json:"diskPath,omitempty"`
+}
+
 type MetricValue struct {
 	UsedPercent float64 `json:"usedPercent"`
 	UsedBytes   uint64  `json:"usedBytes,omitempty"`
@@ -42,6 +48,28 @@ func ReadSystemMetrics() SystemMetrics {
 		}
 	}
 	return metrics
+}
+
+func ReadProcessMetrics() ProcessMetrics {
+	result := ProcessMetrics{}
+	if executable, err := os.Executable(); err == nil {
+		result.DiskPath = executable
+		if info, statErr := os.Stat(executable); statErr == nil {
+			result.DiskBytes = uint64(info.Size())
+		}
+	}
+	if raw, err := os.ReadFile("/proc/self/status"); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] == "VmRSS:" {
+				if value, parseErr := strconv.ParseUint(fields[1], 10, 64); parseErr == nil {
+					result.MemoryBytes = value * 1024
+				}
+				break
+			}
+		}
+	}
+	return result
 }
 
 func readCPUSample() (cpuSample, bool) {

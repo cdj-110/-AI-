@@ -72,16 +72,12 @@ func (s *Server) restartService(writer http.ResponseWriter, request *http.Reques
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := scheduleSelfRestart(); err != nil {
+	if err := scheduleServiceRestart(); err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(writer).Encode(map[string]interface{}{"ok": true, "message": "gateway service is restarting"})
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		os.Exit(0)
-	}()
 }
 
 func (s *Server) rebootGateway(writer http.ResponseWriter, request *http.Request) {
@@ -139,11 +135,10 @@ func (s *Server) factoryReset(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	next := factoryDefaultConfig(current)
-	if err := config.Save(s.configPath, next); err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	if err := s.saveAndApplyConfig(next); err != nil {
+		http.Error(writer, "factory reset failed; previous configuration was restored: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.applyConfig(next)
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(writer).Encode(map[string]interface{}{
 		"ok":              true,
@@ -188,6 +183,7 @@ func factoryDefaultConfig(current config.Config) config.Config {
 		},
 		Web:      current.Web,
 		Security: current.Security,
+		Watchdog: current.Watchdog,
 	}
 	if next.Web.Listen == "" {
 		next.Web = config.ListenerConfig{Enabled: true, Listen: "0.0.0.0:8088"}
@@ -220,6 +216,9 @@ func (s *Server) verifySuperAdminPassword(password string) bool {
 }
 
 func scheduleSelfRestart() error {
+	if os.Getenv("GATEWAY_SUPERVISED") == "1" {
+		return nil
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve executable failed: %w", err)
@@ -236,6 +235,28 @@ func scheduleSelfRestart() error {
 		return fmt.Errorf("start replacement process failed: %w", err)
 	}
 	return command.Process.Release()
+}
+
+func scheduleServiceRestart() error {
+	if runtime.GOOS != "windows" {
+		if _, err := os.Stat("/etc/init.d/S99weikong-gateway"); err == nil {
+			command := exec.Command("sh", "-c", "sleep 1; /etc/init.d/S99weikong-gateway restart")
+			command.Stdout = nil
+			command.Stderr = nil
+			if err := command.Start(); err != nil {
+				return fmt.Errorf("schedule init restart failed: %w", err)
+			}
+			return command.Process.Release()
+		}
+	}
+	if err := scheduleSelfRestart(); err != nil {
+		return err
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		os.Exit(0)
+	}()
+	return nil
 }
 
 func restartEnv(env []string) []string {

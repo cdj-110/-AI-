@@ -3,9 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
-	"time"
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 	"weikong-iot-platform/apps/gateway-go/internal/model"
@@ -47,13 +45,7 @@ func (IEC61850) ReadPoint(ctx context.Context, point config.PointConfig) (model.
 func TestIEC61850Connection(ctx context.Context, address string) (IEC61850ConnectionResult, error) {
 	address = iec61850Address(address)
 	result := IEC61850ConnectionResult{Address: address}
-	dialer := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return result, fmt.Errorf("IEC61850 connection failed %s: %w", address, err)
-	}
-	_ = conn.Close()
-	return result, nil
+	return result, testIEC61850Association(ctx, address)
 }
 
 func iec61850Address(address string) string {

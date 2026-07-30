@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"math"
 	"net"
 	"testing"
 	"time"
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
+	"weikong-iot-platform/apps/gateway-go/internal/packetmonitor"
 	"weikong-iot-platform/apps/gateway-go/internal/state"
 )
 
@@ -41,6 +43,38 @@ func TestModbusResponseUsesForwardedPointValue(t *testing.T) {
 	got := math.Float32frombits(binary.BigEndian.Uint32(response[2:6]))
 	if got != 12.5 {
 		t.Fatalf("register value = %v, want 12.5", got)
+	}
+}
+
+func TestModbusForwardTrafficIsVisibleForForwardDevice(t *testing.T) {
+	cfg, store := modbusWriteTestConfig()
+	manager := NewManager(store)
+	manager.cfg = cfg
+
+	server, client := net.Pipe()
+	defer client.Close()
+	go manager.handleModbusConn(context.Background(), server)
+
+	request := []byte{0, 1, 0, 0, 0, 6, 7, 3, 0, 10, 0, 1}
+	if _, err := client.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, 11)
+	if _, err := io.ReadFull(client, response); err != nil {
+		t.Fatal(err)
+	}
+
+	var frames []packetmonitor.Frame
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		frames = packetmonitor.Default.Snapshot("modbus-forward", ProtocolModbusSlave, 10)
+		if len(frames) >= 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(frames) < 2 || frames[0].Direction != "tx" || frames[1].Direction != "rx" {
+		t.Fatalf("forward frames = %#v, want tx and rx frames for the forwarding device", frames)
 	}
 }
 
@@ -158,6 +192,39 @@ func TestIEC104BooleanPointUsesSinglePointASDU(t *testing.T) {
 	}
 	_ = client.Close()
 	<-done
+}
+
+func TestIEC104SingleCommandWritesSourcePoint(t *testing.T) {
+	cfg, store := forwardTestConfig()
+	cfg.ForwardDevices = []config.ForwardDeviceConfig{{
+		DeviceKey: "iec-control", Protocol: ProtocolIEC104Server, CommonAddress: 1,
+		Points: []config.ForwardPointConfig{{SourceDeviceKey: "d1", SourceMetric: "p1", IOA: 10, PointType: "C_SC_NA_1", DataType: "bool"}},
+	}}
+	writer := &recordingPointWriter{}
+	manager := NewManager(store, writer)
+	manager.cfg = cfg
+	server, client := net.Pipe()
+	defer client.Close()
+	go manager.handleIEC104Conn(context.Background(), server)
+	if _, err := client.Write([]byte{0x68, 0x04, 0x07, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	readIEC104TestPacket(t, client)
+	asdu := []byte{45, 1, 6, 0, 1, 0, 10, 0, 0, 1}
+	packet := make([]byte, 6+len(asdu))
+	packet[0], packet[1] = 0x68, byte(4+len(asdu))
+	copy(packet[6:], asdu)
+	if _, err := client.Write(packet); err != nil {
+		t.Fatal(err)
+	}
+	confirmation := readIEC104TestPacket(t, client)
+	termination := readIEC104TestPacket(t, client)
+	if confirmation[8] != 7 || termination[8] != 10 {
+		t.Fatalf("unexpected command confirmations: %v / %v", confirmation, termination)
+	}
+	if len(writer.writes) != 1 || writer.writes[0].deviceKey != "d1" || writer.writes[0].metric != "p1" || writer.writes[0].value != true {
+		t.Fatalf("writes = %#v", writer.writes)
+	}
 }
 
 func TestForwardDeviceMapsOnlySelectedPointAndUnit(t *testing.T) {

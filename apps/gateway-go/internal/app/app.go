@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,25 +29,28 @@ import (
 )
 
 type App struct {
-	cfg           config.Config
-	configPath    string
-	cloudMu       sync.Mutex
-	clouds        []*cloud.Client
-	cloudState    map[string]bool
-	cloudConfig   map[string]string
-	spoolMu       sync.Mutex
-	spool         *cache.Spool
-	historyMu     sync.Mutex
-	history       *history.Store
-	state         *state.Store
-	runtime       *gatewayruntime.Manager
-	forward       *forward.Manager
-	edge          *edgecompute.Manager
-	collectMu     sync.Mutex
-	runCtx        context.Context
-	collectCancel context.CancelFunc
-	publishMu     sync.Mutex
-	publishQueue  chan telemetryBatch
+	cfg              config.Config
+	configPath       string
+	cloudMu          sync.Mutex
+	clouds           []*cloud.Client
+	cloudState       map[string]bool
+	cloudConfig      map[string]string
+	spoolMu          sync.Mutex
+	spool            *cache.Spool
+	historyMu        sync.Mutex
+	history          *history.Store
+	state            *state.Store
+	runtime          *gatewayruntime.Manager
+	forward          *forward.Manager
+	edge             *edgecompute.Manager
+	collectMu        sync.Mutex
+	runCtx           context.Context
+	collectCancel    context.CancelFunc
+	publishMu        sync.Mutex
+	remoteConfigMu   sync.Mutex
+	publishQueue     *latestTelemetryQueue
+	publishBackoffMu sync.Mutex
+	publishBackoff   map[string]*publishBackoff
 }
 
 type telemetryBatch struct {
@@ -60,17 +66,20 @@ func New(cfg config.Config, configPath string) (*App, error) {
 		return nil, err
 	}
 	return &App{
-		cfg:          cfg,
-		configPath:   configPath,
-		cloudState:   map[string]bool{},
-		cloudConfig:  map[string]string{},
-		spool:        offlineSpool(cfg),
-		history:      historyStore(cfg),
-		state:        store,
-		runtime:      manager,
-		forward:      forward.NewManager(store, manager),
-		edge:         edge,
-		publishQueue: make(chan telemetryBatch, 10000),
+		cfg:         cfg,
+		configPath:  configPath,
+		cloudState:  map[string]bool{},
+		cloudConfig: map[string]string{},
+		spool:       offlineSpool(cfg),
+		history:     historyStore(cfg),
+		state:       store,
+		runtime:     manager,
+		forward:     forward.NewManager(store, manager),
+		edge:        edge,
+		// Realtime telemetry is coalesced by device. Keeping intermediate
+		// samples is harmful on low-memory gateways when a broker is slow.
+		publishQueue:   newLatestTelemetryQueue(),
+		publishBackoff: map[string]*publishBackoff{},
 	}, nil
 }
 
@@ -82,6 +91,7 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.forward.Stop()
 
 	log.Printf("gateway %s started, points=%d", a.cfg.GatewayKey, len(a.cfg.Points))
+	go a.healthLoop(ctx)
 	go a.heartbeatLoop(ctx)
 	go a.topologyLoop(ctx)
 	go a.publishLoop(ctx)
@@ -91,6 +101,20 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.stopCollectWorkers()
 	<-ctx.Done()
 	return nil
+}
+
+func (a *App) healthLoop(ctx context.Context) {
+	a.state.MarkProgress()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.state.MarkProgress()
+		}
+	}
 }
 
 func (a *App) heartbeatLoop(ctx context.Context) {
@@ -108,7 +132,7 @@ func (a *App) heartbeatLoop(ctx context.Context) {
 }
 
 func (a *App) publishGatewayHeartbeat() {
-	if len(a.publishQueue) > 0 {
+	if a.publishQueue.HasPending() {
 		return
 	}
 	a.cloudMu.Lock()
@@ -147,7 +171,7 @@ func (a *App) topologyLoop(ctx context.Context) {
 }
 
 func (a *App) publishTopology() {
-	if len(a.publishQueue) > 0 {
+	if a.publishQueue.HasPending() {
 		return
 	}
 	a.cloudMu.Lock()
@@ -169,17 +193,19 @@ func (a *App) publishTopology() {
 	}
 }
 
-func (a *App) ApplyConfig(cfg config.Config) {
+func (a *App) ApplyConfig(cfg config.Config) error {
 	if err := edgecompute.Validate(cfg); err != nil {
 		a.state.AddError("edge compute config rejected: " + err.Error())
-		return
+		return err
 	}
 	oldCfg := a.runtime.Config()
-	a.runtime.UpdateConfig(cfg)
 	if err := a.edge.UpdateConfig(cfg); err != nil {
 		a.state.AddError("edge compute reload failed: " + err.Error())
-		return
+		return err
 	}
+	// Only tear down active protocol sessions after every synchronous compiler
+	// has accepted the candidate configuration.
+	a.runtime.UpdateConfig(cfg)
 	a.forward.Update(context.Background(), cfg)
 	a.cfg = cfg
 	a.spoolMu.Lock()
@@ -193,6 +219,7 @@ func (a *App) ApplyConfig(cfg config.Config) {
 	}
 	a.restartCollectWorkers()
 	go a.publishTopology()
+	return nil
 }
 
 func (a *App) edgeBatchLoop(ctx context.Context) {
@@ -285,23 +312,16 @@ func (a *App) collectLaneAndPublish(ctx context.Context, laneKey string) {
 
 func (a *App) publishLoop(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		batch, ok := a.publishQueue.Take(ctx)
+		if !ok {
 			return
-		case batch := <-a.publishQueue:
-			a.publishToCloud(batch)
 		}
+		a.publishToCloud(batch)
 	}
 }
 
 func (a *App) enqueueTelemetry(batch telemetryBatch) {
-	select {
-	case a.publishQueue <- batch:
-	default:
-		log.Printf("publish queue full, spooling telemetry batch devices=%d", len(batch.Grouped))
-		a.state.AddError("publish queue full, spooling telemetry batch")
-		a.spoolTelemetry(batch)
-	}
+	a.publishQueue.Put(batch)
 }
 
 func (a *App) publishToCloud(batch telemetryBatch) {
@@ -318,17 +338,40 @@ func (a *App) publishToCloud(batch telemetryBatch) {
 		a.spoolMu.Unlock()
 	}
 	publishedAny := false
+	type manualResult struct {
+		client *cloud.Client
+		err    error
+	}
+	now := time.Now()
+	results := make(chan manualResult, len(clients))
+	manualCount := 0
 	for _, client := range clients {
 		if client.IsManual() {
-			if err := client.PublishManual(grouped); err != nil {
-				log.Printf("publish attributes failed channel=%s: %v", client.Name(), err)
-				a.state.AddError("publish attributes failed " + client.Name() + ": " + err.Error())
-			} else {
-				publishedAny = true
+			if !a.manualPublishReady(client.Name(), now) {
+				continue
 			}
+			manualCount++
+			go func(current *cloud.Client) {
+				results <- manualResult{client: current, err: current.PublishManual(grouped)}
+			}(client)
 			continue
 		}
-
+	}
+	for index := 0; index < manualCount; index++ {
+		result := <-results
+		if errors.Is(result.err, cloud.ErrNoManualPayload) {
+			continue
+		}
+		if result.err != nil {
+			delay := a.manualPublishFailed(result.client.Name(), time.Now())
+			log.Printf("publish attributes failed channel=%s retry_in=%s: %v", result.client.Name(), delay, result.err)
+			a.state.AddError("publish attributes failed " + result.client.Name() + ": " + result.err.Error())
+			a.setCloudChannelConnected(result.client.Name())(false)
+			continue
+		}
+		a.manualPublishSucceeded(result.client.Name())
+		a.setCloudChannelConnected(result.client.Name())(true)
+		publishedAny = true
 	}
 
 	for deviceKey, metrics := range grouped {
@@ -741,11 +784,11 @@ func (a *App) syncCloud(cfg config.Config) {
 			a.state.AddError("manual mqtt connect failed " + channel.Name + ": " + err.Error())
 		} else {
 			a.setCloudChannelConnectedLocked(channelKey, client.IsConnected())
-			if !cfg.Activation.IsReady() {
-				if err := client.SubscribeRemoteConfig(a.applyRemoteConfig, a.remoteConfigSnapshot); err != nil {
-					log.Printf("subscribe remote config failed channel=%s: %v", channel.Name, err)
-				}
-			}
+			// Manual MQTT channels are telemetry integrations. Publishing the
+			// complete gateway configuration here can be several megabytes and
+			// blocks the Paho writer before realtime values are sent. Remote
+			// configuration remains exclusive to the activation/platform
+			// channel above.
 			if err := client.SubscribeAttributes(a.handleMQTTAttributeSet); err != nil {
 				log.Printf("subscribe mqtt attributes failed channel=%s: %v", channel.Name, err)
 				a.state.AddError("subscribe mqtt attributes failed " + channel.Name + ": " + err.Error())
@@ -773,6 +816,13 @@ func (a *App) syncCloud(cfg config.Config) {
 }
 
 func (a *App) applyRemoteConfig(command cloud.RemoteConfigCommand) cloud.RemoteConfigResult {
+	a.remoteConfigMu.Lock()
+	defer a.remoteConfigMu.Unlock()
+	if command.Version > 0 {
+		if applied := a.lastRemoteConfigVersion(); command.Version <= applied {
+			return cloud.RemoteConfigResult{Status: "FAILED", Message: fmt.Sprintf("remote config version %d is not newer than applied version %d", command.Version, applied)}
+		}
+	}
 	current := a.runtime.Config()
 	desired, err := mergeRemoteConfig(current, command.Config)
 	if err != nil {
@@ -785,6 +835,9 @@ func (a *App) applyRemoteConfig(command cloud.RemoteConfigCommand) cloud.RemoteC
 	validated, err := config.Parse(raw)
 	if err != nil {
 		return cloud.RemoteConfigResult{Status: "FAILED", Message: "閰嶇疆鏍￠獙澶辫触: " + err.Error()}
+	}
+	if err := validated.ValidateNewGlobalIdentifierDuplicates(current); err != nil {
+		return cloud.RemoteConfigResult{Status: "FAILED", Message: "remote config identifier validation failed: " + err.Error()}
 	}
 	if err := edgecompute.Validate(validated); err != nil {
 		return cloud.RemoteConfigResult{Status: "FAILED", Message: "边缘计算配置无效: " + err.Error()}
@@ -799,10 +852,28 @@ func (a *App) applyRemoteConfig(command cloud.RemoteConfigCommand) cloud.RemoteC
 	if err := config.Save(a.configPath, validated); err != nil {
 		return cloud.RemoteConfigResult{Status: "FAILED", Message: "淇濆瓨杩滅▼閰嶇疆澶辫触: " + err.Error()}
 	}
-	a.ApplyConfig(validated)
+	if err := a.ApplyConfig(validated); err != nil {
+		_ = os.WriteFile(a.configPath, oldRaw, 0600)
+		_ = a.ApplyConfig(current)
+		return cloud.RemoteConfigResult{Status: "FAILED", Message: "apply remote config failed and previous config was restored: " + err.Error()}
+	}
 	a.runtime.CollectOnce(context.Background())
+	if command.Version > 0 {
+		if err := os.WriteFile(a.configPath+".remote.version", []byte(strconv.Itoa(command.Version)+"\n"), 0600); err != nil {
+			a.state.AddError("persist remote config version failed: " + err.Error())
+		}
+	}
 	log.Printf("remote config applied task=%s version=%d", command.TaskID, command.Version)
 	return cloud.RemoteConfigResult{Status: "APPLIED", Message: "配置已校验、备份并热加载"}
+}
+
+func (a *App) lastRemoteConfigVersion() int {
+	raw, err := os.ReadFile(a.configPath + ".remote.version")
+	if err != nil {
+		return 0
+	}
+	value, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	return value
 }
 
 type attributeSetCommand struct {
@@ -908,10 +979,11 @@ func (a *App) remoteConfigSnapshot() interface{} {
 		}
 	}
 	return map[string]interface{}{
-		"collectIntervalSeconds": cfg.CollectIntervalSeconds,
-		"serialPorts":            cfg.SerialPorts,
-		"devices":                devices,
-		"forwardSlave":           cfg.ForwardSlave,
+		"collectIntervalSeconds":      cfg.CollectIntervalSeconds,
+		"collectIntervalMilliseconds": cfg.CollectIntervalMilliseconds,
+		"serialPorts":                 cfg.SerialPorts,
+		"devices":                     devices,
+		"forwardSlave":                cfg.ForwardSlave,
 	}
 }
 
@@ -1000,11 +1072,51 @@ func (a *App) connectedCloudsLocked() []*cloud.Client {
 func (a *App) setCloudChannelConnected(name string) func(bool) {
 	return func(connected bool) {
 		go func() {
+			if connected && a.manualPublishDegraded(name) {
+				connected = false
+			}
 			a.cloudMu.Lock()
 			defer a.cloudMu.Unlock()
 			a.setCloudChannelConnectedLocked(name, connected)
 		}()
 	}
+}
+
+func (a *App) manualPublishReady(name string, now time.Time) bool {
+	a.publishBackoffMu.Lock()
+	defer a.publishBackoffMu.Unlock()
+	backoff := a.publishBackoff[name]
+	if backoff == nil {
+		backoff = &publishBackoff{}
+		a.publishBackoff[name] = backoff
+	}
+	return backoff.Ready(now)
+}
+
+func (a *App) manualPublishFailed(name string, now time.Time) time.Duration {
+	a.publishBackoffMu.Lock()
+	defer a.publishBackoffMu.Unlock()
+	backoff := a.publishBackoff[name]
+	if backoff == nil {
+		backoff = &publishBackoff{}
+		a.publishBackoff[name] = backoff
+	}
+	return backoff.Fail(now)
+}
+
+func (a *App) manualPublishSucceeded(name string) {
+	a.publishBackoffMu.Lock()
+	defer a.publishBackoffMu.Unlock()
+	if backoff := a.publishBackoff[name]; backoff != nil {
+		backoff.Success()
+	}
+}
+
+func (a *App) manualPublishDegraded(name string) bool {
+	a.publishBackoffMu.Lock()
+	defer a.publishBackoffMu.Unlock()
+	backoff := a.publishBackoff[name]
+	return backoff != nil && backoff.failures > 0
 }
 
 func (a *App) setCloudChannelConnectedLocked(name string, connected bool) {

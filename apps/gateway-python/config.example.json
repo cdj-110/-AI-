@@ -1,0 +1,43 @@
+{
+  "gatewayKey": "PY-GATEWAY-001",
+  "collectIntervalSeconds": 5,
+  "mqtt": {
+    "enabled": false,
+    "broker": "mqtt://127.0.0.1:1883",
+    "clientId": "py-gateway-001",
+    "username": "",
+    "password": ""
+  },
+  "serialPorts": [],
+  "networkPorts": [],
+  "channels": [],
+  "devices": [
+    {
+      "deviceKey": "device-001",
+      "name": "Modbus设备1",
+      "protocol": "modbus-tcp",
+      "address": "127.0.0.1:502",
+      "slaveId": 1,
+      "points": [
+        {
+          "name": "测试寄存器",
+          "metric": "mbtcp_P01",
+          "function": 3,
+          "register": 0,
+          "quantity": 1,
+          "dataType": "uint16",
+          "scale": 1,
+          "offset": 0,
+          "decimals": 0
+        }
+      ]
+    }
+  ],
+  "offlineCache": {"enabled": false, "maxSizeMB": 16, "storagePath": ""},
+  "historyStorage": {"enabled": false, "maxSizeMB": 256, "storagePath": ""},
+  "web": {"enabled": true, "listen": "0.0.0.0:8089"},
+  "security": {
+    "users": [{"username": "admin", "password": "123456", "role": "admin", "enabled": true}],
+    "roles": [{"name": "admin", "permissions": ["*"]}]
+  }
+}

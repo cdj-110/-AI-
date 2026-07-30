@@ -45,10 +45,10 @@ func TestMergeRemoteConfigPreservesMaskedPasswords(t *testing.T) {
 		GatewayKey: "gateway-1",
 		Devices: []config.DeviceConfig{{
 			DeviceKey: "opc-1", Protocol: "opcua", Address: "opc.tcp://localhost:4840", Password: "device-secret",
-			Points: []config.PointConfig{{DeviceKey: "opc-1", Metric: "temperature", Protocol: "opcua", Password: "point-secret"}},
+			Points: []config.PointConfig{{DeviceKey: "opc-1", Metric: "temperature", Protocol: "opcua", NodeID: "ns=2;s=temperature", Password: "point-secret"}},
 		}},
 	}
-	patch := json.RawMessage(`{"devices":[{"deviceKey":"opc-1","protocol":"opcua","address":"opc.tcp://localhost:4840","password":"***","points":[{"deviceKey":"opc-1","metric":"temperature","protocol":"opcua","password":"***"}]}]}`)
+	patch := json.RawMessage(`{"devices":[{"deviceKey":"opc-1","protocol":"opcua","address":"opc.tcp://localhost:4840","password":"***","points":[{"deviceKey":"opc-1","metric":"temperature","protocol":"opcua","nodeId":"ns=2;s=temperature","password":"***"}]}]}`)
 
 	merged, err := mergeRemoteConfig(current, patch)
 	if err != nil {

@@ -16,13 +16,16 @@ import (
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 	"weikong-iot-platform/apps/gateway-go/internal/mapper"
+	"weikong-iot-platform/apps/gateway-go/internal/packetmonitor"
 	"weikong-iot-platform/apps/gateway-go/internal/state"
 )
 
 const (
-	ProtocolNone         = "none"
-	ProtocolModbusSlave  = "modbus-tcp-slave"
-	ProtocolIEC104Server = "iec104-server"
+	ProtocolNone          = "none"
+	ProtocolModbusSlave   = "modbus-tcp-slave"
+	ProtocolIEC104Server  = "iec104-server"
+	ProtocolIEC61850MMS   = "iec61850-mms-server"
+	ProtocolIEC61850GOOSE = "iec61850-goose-publisher"
 )
 
 type Manager struct {
@@ -86,6 +89,26 @@ func (m *Manager) Update(ctx context.Context, cfg config.Config) {
 			}
 		}()
 	}
+	if m.hasForwardProtocol(ProtocolIEC61850MMS) {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			if err := m.serveIEC61850MMS(runCtx, cfg.ForwardSlave.IEC61850Listen); err != nil && runCtx.Err() == nil {
+				log.Printf("iec61850 mms forward server stopped: %v", err)
+				m.store.AddError("IEC61850 MMS forward server stopped: " + err.Error())
+			}
+		}()
+	}
+	if m.hasForwardProtocol(ProtocolIEC61850GOOSE) {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			if err := m.serveIEC61850GOOSE(runCtx); err != nil && runCtx.Err() == nil {
+				log.Printf("iec61850 goose publisher stopped: %v", err)
+				m.store.AddError("IEC61850 GOOSE publisher stopped: " + err.Error())
+			}
+		}()
+	}
 }
 
 func (m *Manager) Stop() {
@@ -122,6 +145,59 @@ func (m *Manager) hasForwardProtocol(protocol string) bool {
 		}
 	}
 	return false
+}
+
+func (m *Manager) forwardDeviceKeys(protocol string, unitID byte, commonAS uint16) []string {
+	cfg := m.config()
+	keys := make([]string, 0, 1)
+	for _, device := range cfg.ForwardDevices {
+		if !device.IsEnabled() || !strings.EqualFold(device.Protocol, protocol) {
+			continue
+		}
+		if protocol == ProtocolModbusSlave && unitID != 0 && device.UnitID != unitID {
+			continue
+		}
+		if protocol == ProtocolIEC104Server && commonAS != 0 && device.CommonAddress != commonAS {
+			continue
+		}
+		keys = append(keys, device.DeviceKey)
+	}
+	return keys
+}
+
+func (m *Manager) recordForwardPacket(protocol, direction, address, summary string, payload []byte, unitID byte, commonAS uint16, packetErr error) {
+	keys := m.forwardDeviceKeys(protocol, unitID, commonAS)
+	if len(keys) == 0 {
+		keys = []string{""}
+	}
+	for _, key := range keys {
+		frame := packetmonitor.Frame{Protocol: protocol, Direction: direction, DeviceKey: key, Address: address, Summary: summary}
+		if packetErr != nil {
+			frame.Error = packetErr.Error()
+		}
+		packetmonitor.Record(frame, payload)
+	}
+}
+
+func modbusForwardSummary(direction string, pdu []byte) string {
+	if len(pdu) == 0 {
+		return "Modbus TCP 转发报文"
+	}
+	function := pdu[0]
+	if function&0x80 != 0 {
+		return fmt.Sprintf("Modbus TCP 转发异常响应 功能码=%d 异常码=%d", function&0x7f, byteAt(pdu, 1))
+	}
+	if direction == "rx" {
+		return fmt.Sprintf("Modbus TCP 转发请求 功能码=%d", function)
+	}
+	return fmt.Sprintf("Modbus TCP 转发响应 功能码=%d", function)
+}
+
+func byteAt(value []byte, index int) byte {
+	if index < 0 || index >= len(value) {
+		return 0
+	}
+	return value[index]
 }
 
 func (m *Manager) points(protocol string) []forwardPoint {
@@ -206,6 +282,8 @@ func (m *Manager) handleModbusConn(ctx context.Context, conn net.Conn) {
 		if _, err := io.ReadFull(conn, pdu); err != nil {
 			return
 		}
+		request := append(append([]byte(nil), header...), pdu...)
+		m.recordForwardPacket(ProtocolModbusSlave, "rx", conn.RemoteAddr().String(), modbusForwardSummary("rx", pdu), request, header[6], 0, nil)
 		response := m.modbusResponseForUnitContext(ctx, header[6], pdu)
 		adu := make([]byte, 7+len(response))
 		copy(adu[0:4], header[0:4])
@@ -214,8 +292,10 @@ func (m *Manager) handleModbusConn(ctx context.Context, conn net.Conn) {
 		copy(adu[7:], response)
 		_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 		if _, err := conn.Write(adu); err != nil {
+			m.recordForwardPacket(ProtocolModbusSlave, "tx", conn.RemoteAddr().String(), modbusForwardSummary("tx", response), adu, header[6], 0, err)
 			return
 		}
+		m.recordForwardPacket(ProtocolModbusSlave, "tx", conn.RemoteAddr().String(), modbusForwardSummary("tx", response), adu, header[6], 0, nil)
 		select {
 		case <-ctx.Done():
 			return
@@ -518,7 +598,7 @@ func (m *Manager) handleIEC104Conn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	session := &iec104Session{conn: conn, commonAS: 1, baseline: map[string]string{}}
+	session := &iec104Session{conn: conn, manager: m, remoteAddress: conn.RemoteAddr().String(), commonAS: 1, baseline: map[string]string{}}
 	go session.pushChanges(sessionCtx, m)
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -529,6 +609,11 @@ func (m *Manager) handleIEC104Conn(ctx context.Context, conn net.Conn) {
 		if len(packet) < 6 {
 			continue
 		}
+		commonAS, _, _ := session.state()
+		if packet[2]&0x01 == 0 && len(packet) >= 12 {
+			commonAS = binary.LittleEndian.Uint16(packet[10:12])
+		}
+		m.recordForwardPacket(ProtocolIEC104Server, "rx", conn.RemoteAddr().String(), iec104ForwardSummary(packet), packet, 0, commonAS, nil)
 		control := packet[2]
 		if control == 0x07 {
 			session.setStarted(true)
@@ -558,6 +643,8 @@ func (m *Manager) handleIEC104Conn(ctx context.Context, conn net.Conn) {
 
 type iec104Session struct {
 	conn          net.Conn
+	manager       *Manager
+	remoteAddress string
 	writeMu       sync.Mutex
 	stateMu       sync.RWMutex
 	sendSeq       uint16
@@ -569,13 +656,21 @@ type iec104Session struct {
 }
 
 func (s *iec104Session) handleASDU(m *Manager, asdu []byte) {
-	if len(asdu) < 10 || asdu[0] != 100 {
+	if len(asdu) < 10 {
 		_ = s.sendAck()
 		return
 	}
 	commonAS := binary.LittleEndian.Uint16(asdu[4:6])
 	if commonAS != 0 {
 		s.setCommonAS(commonAS)
+	}
+	if asdu[0] >= 45 && asdu[0] <= 50 {
+		s.handleCommandASDU(m, asdu)
+		return
+	}
+	if asdu[0] != 100 {
+		_ = s.sendAck()
+		return
 	}
 	_ = s.sendInterrogation(0x07)
 	points := s.forwardPoints(m)
@@ -584,6 +679,75 @@ func (s *iec104Session) handleASDU(m *Manager, asdu []byte) {
 	}
 	_ = s.sendInterrogation(0x0a)
 	s.captureBaseline(points)
+}
+
+func (s *iec104Session) handleCommandASDU(m *Manager, asdu []byte) {
+	ioa := uint32(asdu[6]) | uint32(asdu[7])<<8 | uint32(asdu[8])<<16
+	var value interface{}
+	var qualifier byte
+	switch asdu[0] {
+	case 45:
+		value, qualifier = asdu[9]&1 != 0, asdu[9]
+	case 46:
+		state := asdu[9] & 0x03
+		if state != 1 && state != 2 {
+			s.sendCommandConfirmation(asdu, false, false)
+			return
+		}
+		value, qualifier = state == 2, asdu[9]
+	case 48, 49:
+		if len(asdu) < 12 {
+			s.sendCommandConfirmation(asdu, false, false)
+			return
+		}
+		raw := int16(binary.LittleEndian.Uint16(asdu[9:11]))
+		if asdu[0] == 48 {
+			value = float64(raw) / 32767
+		} else {
+			value = raw
+		}
+		qualifier = asdu[11]
+	case 50:
+		if len(asdu) < 14 {
+			s.sendCommandConfirmation(asdu, false, false)
+			return
+		}
+		value = float64(math.Float32frombits(binary.LittleEndian.Uint32(asdu[9:13])))
+		qualifier = asdu[13]
+	}
+	var target *forwardPoint
+	for _, point := range s.forwardPoints(m) {
+		pointIOA := point.Config.IOA
+		if pointIOA == 0 {
+			pointIOA = uint32(point.Config.Register)
+		}
+		if pointIOA == ioa {
+			candidate := point
+			target = &candidate
+			break
+		}
+	}
+	if target == nil {
+		s.sendCommandConfirmation(asdu, false, false)
+		return
+	}
+	selectOnly := qualifier&0x80 != 0
+	success := selectOnly || m.writeForwardPoint(context.Background(), *target, value)
+	s.sendCommandConfirmation(asdu, success, !selectOnly && success)
+}
+
+func (s *iec104Session) sendCommandConfirmation(request []byte, success, terminate bool) {
+	confirmation := append([]byte(nil), request...)
+	confirmation[2] = 7
+	if !success {
+		confirmation[2] |= 0x40
+	}
+	_ = s.writeI(confirmation)
+	if terminate {
+		termination := append([]byte(nil), request...)
+		termination[2] = 10
+		_ = s.writeI(termination)
+	}
 }
 
 func (s *iec104Session) sendAck() error {
@@ -661,7 +825,35 @@ func (s *iec104Session) writeRaw(packet []byte) error {
 func (s *iec104Session) writeRawLocked(packet []byte) error {
 	_ = s.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 	_, err := s.conn.Write(packet)
+	if s.manager != nil {
+		commonAS, _, _ := s.state()
+		s.manager.recordForwardPacket(ProtocolIEC104Server, "tx", s.remoteAddress, iec104ForwardSummary(packet), packet, 0, commonAS, err)
+	}
 	return err
+}
+
+func iec104ForwardSummary(packet []byte) string {
+	if len(packet) < 6 {
+		return "IEC104 转发报文"
+	}
+	switch packet[2] {
+	case 0x07:
+		return "IEC104 STARTDT 激活"
+	case 0x0b:
+		return "IEC104 STARTDT 确认"
+	case 0x13:
+		return "IEC104 STOPDT 停止"
+	case 0x23:
+		return "IEC104 STOPDT 确认"
+	case 0x43:
+		return "IEC104 TESTFR 测试"
+	case 0x83:
+		return "IEC104 TESTFR 确认"
+	}
+	if packet[2]&0x01 == 0 && len(packet) > 6 {
+		return fmt.Sprintf("IEC104 转发 I 帧 ASDU=%d", packet[6])
+	}
+	return "IEC104 转发 S 帧确认"
 }
 
 func (s *iec104Session) setStarted(started bool) {

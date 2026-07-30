@@ -77,14 +77,9 @@ func (s *Server) updateOfflineCache(writer http.ResponseWriter, request *http.Re
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := config.Save(s.configPath, cfg); err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
+	if err := s.saveAndApplyConfig(cfg); err != nil {
+		http.Error(writer, "apply offline cache configuration failed; previous configuration was restored: "+err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if s.onConfig != nil {
-		s.onConfig(cfg)
-	} else {
-		s.runtime.UpdateConfig(cfg)
 	}
 	s.writeStorageStatus(writer)
 }

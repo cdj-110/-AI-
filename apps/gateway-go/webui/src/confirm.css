@@ -1,0 +1,24 @@
+.global-confirm-modal {
+  z-index: 190;
+}
+
+.global-confirm-modal .dialog-panel {
+  width: min(420px, 100%);
+}
+
+.global-confirm-modal .global-confirm-detail {
+  margin-top: -8px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 12px;
+}
+
+.global-confirm-modal .dialog-actions {
+  margin-top: 4px;
+}
+
+.restart-modal .point-batch-dialog {
+  width: min(560px, 100%);
+}

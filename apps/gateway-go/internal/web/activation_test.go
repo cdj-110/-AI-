@@ -37,8 +37,9 @@ func TestSaveActivationDoesNotWaitForConfigApply(t *testing.T) {
 	applyBlocked := make(chan struct{})
 	server := &Server{
 		configPath: configPath,
-		onConfig: func(config.Config) {
+		onConfig: func(config.Config) error {
 			<-applyBlocked
+			return nil
 		},
 	}
 	request := httptest.NewRequest(http.MethodPut, "/api/activation", bytes.NewReader(body))
@@ -85,7 +86,7 @@ func TestSaveDisabledActivationResetsStatusImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{configPath: configPath, store: store, onConfig: func(config.Config) {}}
+	server := &Server{configPath: configPath, store: store, onConfig: func(config.Config) error { return nil }}
 	request := httptest.NewRequest(http.MethodPut, "/api/activation", bytes.NewReader(body))
 	response := httptest.NewRecorder()
 

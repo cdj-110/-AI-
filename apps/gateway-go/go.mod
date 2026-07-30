@@ -9,6 +9,7 @@ require (
 	github.com/gopcua/opcua v0.8.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/robinson/gos7 v0.0.0-20241205073040-7ea1d6fb9d20
+	golang.org/x/crypto v0.25.0
 )
 
 require (

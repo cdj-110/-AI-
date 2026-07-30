@@ -1,0 +1,53 @@
+#!/bin/sh
+
+DAEMON=/mnt/udisk/.weikong/python/current/run-eg100.sh
+PIDFILE=/var/run/weikong-gateway-python.pid
+
+case "$1" in
+  start)
+    mount -o remount,rw,exec /mnt/udisk >/dev/null 2>&1 || true
+    if [ ! -x "$DAEMON" ]; then
+      echo "weikong Python gateway is unavailable: $DAEMON"
+      exit 1
+    fi
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "weikong Python gateway is already running (pid $(cat "$PIDFILE"))"
+      exit 0
+    fi
+    rm -f "$PIDFILE"
+    echo "Starting weikong Python gateway"
+    start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON"
+    ;;
+  stop)
+    if [ -f "$PIDFILE" ]; then
+      PID="$(cat "$PIDFILE" 2>/dev/null)"
+      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        kill -TERM "$PID"
+        COUNT=0
+        while kill -0 "$PID" 2>/dev/null && [ "$COUNT" -lt 15 ]; do
+          sleep 1
+          COUNT=$((COUNT + 1))
+        done
+        kill -0 "$PID" 2>/dev/null && kill -KILL "$PID"
+      fi
+      rm -f "$PIDFILE"
+    fi
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  status)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "weikong Python gateway is running (pid $(cat "$PIDFILE"))"
+      exit 0
+    fi
+    echo "weikong Python gateway is not running"
+    exit 1
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac

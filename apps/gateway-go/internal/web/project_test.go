@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,41 @@ import (
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 )
+
+func TestSaveAndApplyConfigRestoresPreviousConfigOnApplyFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"gatewayKey":"old","mqtt":{"enabled":false}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var applied []string
+	server := &Server{
+		configPath: configPath,
+		onConfig: func(cfg config.Config) error {
+			applied = append(applied, cfg.GatewayKey)
+			if cfg.GatewayKey == "new" {
+				return errors.New("simulated apply failure")
+			}
+			return nil
+		},
+	}
+
+	err := server.saveAndApplyConfig(config.Config{GatewayKey: "new"})
+	if err == nil {
+		t.Fatal("expected apply failure")
+	}
+	if len(applied) != 2 || applied[0] != "new" || applied[1] != "old" {
+		t.Fatalf("apply sequence = %#v, want [new old]", applied)
+	}
+	restored, loadErr := config.Load(configPath)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if restored.GatewayKey != "old" {
+		t.Fatalf("restored gatewayKey = %q, want old", restored.GatewayKey)
+	}
+}
 
 func TestExportProjectDownloadsCurrentConfig(t *testing.T) {
 	tempDir := t.TempDir()
@@ -32,8 +68,12 @@ func TestExportProjectDownloadsCurrentConfig(t *testing.T) {
 	if !strings.Contains(response.Header().Get("Content-Disposition"), "weikong-project-gw-01-") {
 		t.Fatalf("unexpected content disposition: %q", response.Header().Get("Content-Disposition"))
 	}
-	if response.Body.String() != string(raw) {
-		t.Fatalf("export body = %s, want %s", response.Body.String(), string(raw))
+	var exported config.Config
+	if err := json.Unmarshal(response.Body.Bytes(), &exported); err != nil {
+		t.Fatal(err)
+	}
+	if exported.GatewayKey != "gw-01" || len(exported.Devices) != 1 || exported.Devices[0].DeviceKey != "dev-01" {
+		t.Fatalf("unexpected export: %#v", exported)
 	}
 }
 
@@ -48,8 +88,9 @@ func TestImportProjectSavesAndAppliesConfig(t *testing.T) {
 	var applied config.Config
 	server := &Server{
 		configPath: configPath,
-		onConfig: func(cfg config.Config) {
+		onConfig: func(cfg config.Config) error {
 			applied = cfg
+			return nil
 		},
 	}
 

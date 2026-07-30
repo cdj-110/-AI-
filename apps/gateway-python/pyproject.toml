@@ -1,0 +1,24 @@
+[project]
+name = "weikong-gateway-python"
+version = "0.1.0"
+description = "Python backend edition of the Weikong industrial IoT gateway"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.34.0",
+  "paho-mqtt==2.1.0",
+  "pymodbus==3.8.3",
+  "pyserial==3.5",
+  "asyncua==1.1.5",
+  "python-multipart==0.0.20",
+]
+
+[project.scripts]
+weikong-gateway-python = "gateway.main:run"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["gateway*"]

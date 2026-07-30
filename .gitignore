@@ -18,6 +18,10 @@ apps/gateway-go/activation.local.json
 apps/gateway-go/gateway-*
 apps/gateway-go/.build/
 apps/gateway-go/.tools/
+apps/gateway-go/.gocache*/
+apps/gateway-go/.gopath/
+apps/gateway-go/.gotmp/
+apps/gateway-go/.zig-cache*/
 apps/gateway-go/.tmp-*
 apps/gateway-go/*.local.dev.json
 apps/gateway-go/config.iec61850-local.json
@@ -28,4 +32,10 @@ apps/gateway-go/libiec61850.dll
 apps/gateway-go/deploy/eg100/*.zip
 apps/gateway-go/deploy/eg100/*.gz
 apps/gateway-go/deploy/eg100/weikong-gateway-linux-armv7
+apps/gateway-python/.venv/
+apps/gateway-python/config.local.json
+apps/gateway-python/.runtime/
+apps/gateway-python/**/__pycache__/
 eg100-config-backups/
+gateway-artifacts/**
+!gateway-artifacts/README.md

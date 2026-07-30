@@ -33,17 +33,19 @@ type InterfaceStatus struct {
 }
 
 type WiFiStatus struct {
-	Config     config.WiFiConfig `json:"config"`
-	Interface  string            `json:"interface"`
-	Available  bool              `json:"available"`
-	Connected  bool              `json:"connected"`
-	SSID       string            `json:"ssid,omitempty"`
-	Signal     int               `json:"signal,omitempty"`
-	IPv4       string            `json:"ipv4,omitempty"`
-	Tool       string            `json:"tool,omitempty"`
-	Message    string            `json:"message,omitempty"`
-	Apply      *ApplyStatus      `json:"apply,omitempty"`
-	Interfaces []string          `json:"interfaces,omitempty"`
+	Config          config.WiFiConfig `json:"config"`
+	Interface       string            `json:"interface"`
+	Available       bool              `json:"available"`
+	Connected       bool              `json:"connected"`
+	BootEnabled     bool              `json:"bootEnabled"`
+	RestartRequired bool              `json:"restartRequired"`
+	SSID            string            `json:"ssid,omitempty"`
+	Signal          int               `json:"signal,omitempty"`
+	IPv4            string            `json:"ipv4,omitempty"`
+	Tool            string            `json:"tool,omitempty"`
+	Message         string            `json:"message,omitempty"`
+	Apply           *ApplyStatus      `json:"apply,omitempty"`
+	Interfaces      []string          `json:"interfaces,omitempty"`
 }
 
 type WiFiNetwork struct {
@@ -150,12 +152,14 @@ func Interfaces() ([]InterfaceStatus, error) {
 func WiFi(configured config.WiFiConfig) WiFiStatus {
 	configured.ApplyDefaults()
 	status := WiFiStatus{
-		Config:     configured,
-		Interface:  configured.Interface,
-		Apply:      currentApplyStatus("wifi:" + configured.Interface),
-		Interfaces: wirelessInterfaces(),
+		Config:      configured,
+		Interface:   configured.Interface,
+		BootEnabled: WirelessBootEnabled(),
+		Apply:       currentApplyStatus("wifi:" + configured.Interface),
+		Interfaces:  wirelessInterfaces(),
 	}
 	status.Available = containsString(status.Interfaces, configured.Interface)
+	status.RestartRequired = configured.Enabled != status.Available
 	var current InterfaceStatus
 	if current, err := interfaceStatusByName(configured.Interface); err == nil {
 		status.IPv4 = current.IPv4Address
@@ -184,7 +188,9 @@ func WiFi(configured config.WiFiConfig) WiFiStatus {
 			status.Signal = signal
 		}
 	}
-	if !status.Available {
+	if !status.Available && configured.Enabled && status.BootEnabled {
+		status.Message = "WiFi 配置已保存，重启网关后生效"
+	} else if !status.Available {
 		status.Message = "未检测到 WiFi 网卡 " + configured.Interface
 	} else if !status.Connected {
 		status.Message = "WiFi 网卡已检测到，但当前未连接"
@@ -347,19 +353,98 @@ func ScheduleApplyWiFi(wifi config.WiFiConfig) error {
 	if err := ValidateWiFi(wifi); err != nil {
 		return err
 	}
-	key := "wifi:" + wifi.Interface
-	setApplyStatus(key, ApplyStatus{State: "pending", Message: "wifi configuration is scheduled", UpdatedAt: time.Now()})
 	go func() {
 		time.Sleep(time.Second)
-		err := applyWiFi(wifi)
-		status := ApplyStatus{State: "applied", Message: "wifi configuration applied", UpdatedAt: time.Now()}
-		if err != nil {
-			status.State = "error"
-			status.Message = err.Error()
-		}
-		setApplyStatus(key, status)
+		_ = ApplyWiFiNow(wifi)
 	}()
 	return nil
+}
+
+// ApplyWiFiNow applies a connection profile synchronously and waits until the
+// interface has a usable address. Failed attempts restore the previous files
+// and interface configuration so the API can report a definitive result.
+func ApplyWiFiNow(wifi config.WiFiConfig) error {
+	wifi.ApplyDefaults()
+	if err := ValidateWiFi(wifi); err != nil {
+		return err
+	}
+	key := "wifi:" + wifi.Interface
+	snapshots := captureFiles(
+		filepath.Join("/etc/network/interfaces.d", wifi.Interface),
+		resolveWritePath(filepath.Join("/etc/wpa_supplicant", "wpa_supplicant-"+wifi.Interface+".conf")),
+		resolveWritePath("/etc/resolv.conf"),
+	)
+	setApplyStatus(key, ApplyStatus{State: "pending", Message: "wifi configuration is applying", UpdatedAt: time.Now()})
+	err := applyWiFi(wifi)
+	status := ApplyStatus{State: "applied", Message: "wifi configuration applied", UpdatedAt: time.Now()}
+	if err == nil && wifi.Enabled && !waitForInterfaceReady(wifi.Interface, wifi.Mode, wifi.IPAddress, 30*time.Second) {
+		err = fmt.Errorf("wifi did not obtain a usable IP address")
+	}
+	if err != nil {
+		_ = restoreFiles(snapshots)
+		_ = restartInterface(wifi.Interface)
+		status.State = "rolled_back"
+		status.Message = err.Error() + "; previous configuration was restored"
+	}
+	setApplyStatus(key, status)
+	return err
+}
+
+const defaultWirelessBootMarker = "/userdata/weikong/config/wireless-enabled"
+
+func wirelessBootMarkerPath() string {
+	if path := strings.TrimSpace(os.Getenv("GATEWAY_WIRELESS_MARKER")); path != "" {
+		return path
+	}
+	return defaultWirelessBootMarker
+}
+
+// WirelessBootEnabled reports whether the memory-heavy WiFi/BT stack should
+// be loaded during the next boot.
+func WirelessBootEnabled() bool {
+	_, err := os.Stat(wirelessBootMarkerPath())
+	return err == nil
+}
+
+// SetWirelessBootEnabled changes only the persistent next-boot setting. The
+// driver is deliberately never loaded or unloaded online because doing so can
+// create enough transient pressure to OOM a 128 MiB EG100.
+func SetWirelessBootEnabled(enabled bool) error {
+	path := wirelessBootMarkerPath()
+	if !enabled {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return writeAtomic(path, []byte("enabled\n"), 0644)
+}
+
+// PrepareWiFiConfiguration writes the files consumed by the vendor boot
+// scripts without touching the currently running interface.
+func PrepareWiFiConfiguration(wifi config.WiFiConfig) error {
+	wifi.ApplyDefaults()
+	if err := ValidateWiFi(wifi); err != nil {
+		return err
+	}
+	wpaPath := filepath.Join("/etc/wpa_supplicant", "wpa_supplicant-"+wifi.Interface+".conf")
+	if wifi.Enabled {
+		if err := writeAtomic(resolveWritePath(wpaPath), []byte(renderWPAConfig(wifi)), 0600); err != nil {
+			return err
+		}
+	}
+	port := config.NetworkPort{
+		Name:         wifi.Interface,
+		Interface:    wifi.Interface,
+		Mode:         wifi.Mode,
+		IPAddress:    wifi.IPAddress,
+		PrefixLength: wifi.PrefixLength,
+		Gateway:      wifi.Gateway,
+		DNS:          wifi.DNS,
+		Enabled:      wifi.Enabled,
+	}
+	path := filepath.Join("/etc/network/interfaces.d", wifi.Interface)
+	return writeAtomic(path, []byte(renderWiFiInterfacesFile(port, wpaPath)), 0644)
 }
 
 func ValidateWiFi(wifi config.WiFiConfig) error {
@@ -425,6 +510,11 @@ func ScheduleApply(port config.NetworkPort) error {
 		return err
 	}
 	setApplyStatus(port.Interface, ApplyStatus{State: "pending", Message: "network configuration is scheduled", UpdatedAt: time.Now()})
+	snapshots := captureFiles(
+		filepath.Join("/etc/network/interfaces.d", port.Interface),
+		resolveWritePath("/etc/resolv.conf"),
+		"/etc/resolv.conf.head",
+	)
 	go func() {
 		time.Sleep(time.Second)
 		err := apply(port)
@@ -432,10 +522,75 @@ func ScheduleApply(port config.NetworkPort) error {
 		if err != nil {
 			status.State = "error"
 			status.Message = err.Error()
+		} else if port.Enabled && !waitForInterfaceReady(port.Interface, port.Mode, port.IPAddress, 30*time.Second) {
+			_ = restoreFiles(snapshots)
+			_ = restartInterface(port.Interface)
+			status.State = "rolled_back"
+			status.Message = "interface did not become ready; previous configuration was restored"
 		}
 		setApplyStatus(port.Interface, status)
 	}()
 	return nil
+}
+
+type fileSnapshot struct {
+	path    string
+	content []byte
+	mode    os.FileMode
+	exists  bool
+}
+
+func captureFiles(paths ...string) []fileSnapshot {
+	result := make([]fileSnapshot, 0, len(paths))
+	for _, path := range paths {
+		snapshot := fileSnapshot{path: path, mode: 0600}
+		if info, err := os.Stat(path); err == nil {
+			snapshot.exists = true
+			snapshot.mode = info.Mode().Perm()
+			snapshot.content, _ = os.ReadFile(path)
+		}
+		result = append(result, snapshot)
+	}
+	return result
+}
+
+func restoreFiles(snapshots []fileSnapshot) error {
+	for _, snapshot := range snapshots {
+		if !snapshot.exists {
+			if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			continue
+		}
+		if err := writeAtomic(snapshot.path, snapshot.content, snapshot.mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func waitForInterfaceReady(name, mode, expectedIP string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, err := interfaceStatusByName(name)
+		if err == nil && status.Up {
+			if mode == "dhcp" && status.IPv4Address != "" {
+				return true
+			}
+			if mode == "static" && status.IPv4Address == expectedIP {
+				return true
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
+func restartInterface(name string) error {
+	_ = exec.Command("/sbin/ifdown", name).Run()
+	_ = exec.Command("ip", "addr", "flush", "dev", name).Run()
+	_ = exec.Command("ip", "route", "flush", "dev", name).Run()
+	return exec.Command("/sbin/ifup", name).Run()
 }
 
 func apply(port config.NetworkPort) error {
@@ -466,31 +621,14 @@ func apply(port config.NetworkPort) error {
 }
 
 func applyWiFi(wifi config.WiFiConfig) error {
-	wpaPath := filepath.Join("/etc/wpa_supplicant", "wpa_supplicant-"+wifi.Interface+".conf")
-	wpaWritePath := resolveWritePath(wpaPath)
-	if wifi.Enabled {
-		if err := writeAtomic(wpaWritePath, []byte(renderWPAConfig(wifi)), 0600); err != nil {
-			return err
-		}
-	}
-	port := config.NetworkPort{
-		Name:         wifi.Interface,
-		Interface:    wifi.Interface,
-		Mode:         wifi.Mode,
-		IPAddress:    wifi.IPAddress,
-		PrefixLength: wifi.PrefixLength,
-		Gateway:      wifi.Gateway,
-		DNS:          wifi.DNS,
-		Enabled:      wifi.Enabled,
-	}
 	path := filepath.Join("/etc/network/interfaces.d", wifi.Interface)
 	old, oldErr := os.ReadFile(path)
+	if err := PrepareWiFiConfiguration(wifi); err != nil {
+		return err
+	}
 	_ = exec.Command("/sbin/ifdown", wifi.Interface).Run()
 	_ = exec.Command("ip", "addr", "flush", "dev", wifi.Interface).Run()
 	_ = exec.Command("ip", "route", "flush", "dev", wifi.Interface).Run()
-	if err := writeAtomic(path, []byte(renderWiFiInterfacesFile(port, wpaPath)), 0644); err != nil {
-		return err
-	}
 	if !wifi.Enabled {
 		return exec.Command("ip", "link", "set", "dev", wifi.Interface, "down").Run()
 	}
@@ -605,7 +743,18 @@ func writeDNS(servers []string) error {
 		builder.WriteString(server)
 		builder.WriteByte('\n')
 	}
-	return writeAtomic("/etc/resolv.conf", []byte(builder.String()), 0644)
+	content := []byte(builder.String())
+	if err := writeAtomic("/etc/resolv.conf.head", content, 0644); err != nil {
+		return err
+	}
+	if err := writeAtomic(resolveWritePath("/etc/resolv.conf"), content, 0644); err != nil {
+		return err
+	}
+	// Chrony may retain an unresolved hostname after DNS becomes available.
+	// Refreshing is best-effort because some gateway images may not include it.
+	_ = exec.Command("chronyc", "refresh").Run()
+	_ = exec.Command("chronyc", "online").Run()
+	return nil
 }
 
 func configuredMode(name string) string {

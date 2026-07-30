@@ -1,6 +1,7 @@
 package networking
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -46,6 +47,26 @@ func TestRenderWiFiInterfaceFile(t *testing.T) {
 		if !strings.Contains(content, expected) {
 			t.Errorf("rendered wifi config missing %q:\n%s", expected, content)
 		}
+	}
+}
+
+func TestWirelessBootMarker(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "wireless-enabled")
+	t.Setenv("GATEWAY_WIRELESS_MARKER", marker)
+	if WirelessBootEnabled() {
+		t.Fatal("wireless boot unexpectedly enabled")
+	}
+	if err := SetWirelessBootEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	if !WirelessBootEnabled() {
+		t.Fatal("wireless boot marker was not enabled")
+	}
+	if err := SetWirelessBootEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	if WirelessBootEnabled() {
+		t.Fatal("wireless boot marker was not removed")
 	}
 }
 

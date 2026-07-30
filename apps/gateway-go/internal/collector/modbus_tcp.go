@@ -54,7 +54,9 @@ func (ModbusTCP) ReadPoint(ctx context.Context, point config.PointConfig) (model
 	if err := conn.lockRead(ctx); err != nil {
 		return model.PointValue{}, fmt.Errorf("%w: %v", ErrCollectionDeferred, err)
 	}
+	recordModbusReadRequest("modbus-tcp", point)
 	raw, err := readByFunction(ctx, conn.client, point)
+	recordModbusReadResponse("modbus-tcp", point, raw, err)
 	conn.unlock()
 	if err != nil {
 		closeTCPConnection(point, conn)
@@ -80,7 +82,9 @@ func (ModbusTCP) ReadRegisterRange(ctx context.Context, point config.PointConfig
 	if err := conn.lockRead(ctx); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCollectionDeferred, err)
 	}
+	recordModbusReadRequest("modbus-tcp", rangePoint)
 	raw, err := readByFunction(ctx, conn.client, rangePoint)
+	recordModbusReadResponse("modbus-tcp", rangePoint, raw, err)
 	conn.unlock()
 	if err != nil {
 		closeTCPConnection(point, conn)
@@ -98,6 +102,7 @@ func (ModbusTCP) WritePoint(ctx context.Context, point config.PointConfig, value
 		return err
 	}
 	err = writeByFunction(ctx, conn.client, point, value)
+	recordModbusWrite("modbus-tcp", point, value, err)
 	conn.unlock()
 	if err != nil {
 		closeTCPWriteConnection(point, conn)

@@ -3,9 +3,27 @@
 DAEMON=/userdata/weikong/bin/weikong-gateway
 CONFIG=/userdata/weikong/config/config.local.json
 PIDFILE=/var/run/weikong-gateway.pid
+PROCNAME=weikong-gateway
+
+wait_for_runtime_files() {
+  COUNT=0
+  while [ "$COUNT" -lt 30 ]; do
+    [ -x "$DAEMON" ] && [ -f "$CONFIG" ] && return 0
+    sleep 1
+    COUNT=$((COUNT + 1))
+  done
+  return 1
+}
+
+gateway_pids() {
+  pidof "$PROCNAME" 2>/dev/null || true
+}
 
 case "$1" in
   start)
+    if ! wait_for_runtime_files; then
+      echo "weikong-gateway: runtime files are not ready after waiting"
+    fi
     if [ ! -x "$DAEMON" ]; then
       echo "weikong-gateway: executable not found: $DAEMON"
       exit 1
@@ -15,12 +33,62 @@ case "$1" in
       exit 1
     fi
     mkdir -p /userdata/weikong/data
-    echo "Starting weikong-gateway"
-    start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- -config "$CONFIG"
+    if [ -f "$PIDFILE" ]; then
+      PID="$(cat "$PIDFILE" 2>/dev/null)"
+      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        echo "weikong-gateway supervisor is already running (pid $PID)"
+        exit 0
+      fi
+      rm -f "$PIDFILE"
+    fi
+    if [ -n "$(gateway_pids)" ]; then
+      echo "weikong-gateway process exists without a valid supervisor pid file; refusing duplicate start"
+      exit 1
+    fi
+    echo "Starting weikong-gateway supervisor"
+    export GOMEMLIMIT="${GOMEMLIMIT:-24MiB}"
+    export GOGC="${GOGC:-70}"
+    start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- -supervise -config "$CONFIG"
     ;;
   stop)
-    echo "Stopping weikong-gateway"
-    start-stop-daemon -K -p "$PIDFILE" -x "$DAEMON"
+    if [ ! -f "$PIDFILE" ]; then
+      PIDS="$(gateway_pids)"
+      if [ -z "$PIDS" ]; then
+        echo "weikong-gateway supervisor pid file is missing and no process is running"
+        exit 0
+      fi
+      echo "weikong-gateway supervisor pid file is missing; stopping existing process(es): $PIDS"
+      for PID in $PIDS; do
+        kill -TERM "$PID" 2>/dev/null || true
+      done
+      COUNT=0
+      while [ -n "$(gateway_pids)" ] && [ "$COUNT" -lt 10 ]; do
+        sleep 1
+        COUNT=$((COUNT + 1))
+      done
+      for PID in $(gateway_pids); do
+        kill -KILL "$PID" 2>/dev/null || true
+      done
+      rm -f "$PIDFILE"
+      exit 0
+    fi
+    PID="$(cat "$PIDFILE" 2>/dev/null)"
+    if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+      echo "weikong-gateway supervisor is not running"
+      rm -f "$PIDFILE"
+      exit 0
+    fi
+    echo "Stopping weikong-gateway supervisor (pid $PID)"
+    kill -TERM "$PID"
+    COUNT=0
+    while kill -0 "$PID" 2>/dev/null && [ "$COUNT" -lt 10 ]; do
+      sleep 1
+      COUNT=$((COUNT + 1))
+    done
+    if kill -0 "$PID" 2>/dev/null; then
+      echo "Supervisor did not stop in time; forcing termination"
+      kill -KILL "$PID"
+    fi
     rm -f "$PIDFILE"
     ;;
   restart)
@@ -28,8 +96,21 @@ case "$1" in
     sleep 1
     "$0" start
     ;;
+  status)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "weikong-gateway supervisor is running (pid $(cat "$PIDFILE"))"
+      exit 0
+    fi
+    PIDS="$(gateway_pids)"
+    if [ -n "$PIDS" ]; then
+      echo "weikong-gateway process is running without supervisor pid file: $PIDS"
+      exit 0
+    fi
+    echo "weikong-gateway supervisor is not running"
+    exit 1
+    ;;
   *)
-    echo "Usage: $0 {start|stop|restart}"
+    echo "Usage: $0 {start|stop|restart|status}"
     exit 1
     ;;
 esac

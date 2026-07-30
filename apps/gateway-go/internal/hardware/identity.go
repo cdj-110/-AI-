@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,7 +22,17 @@ type Identity struct {
 	Message   string `json:"message,omitempty"`
 }
 
+var identityOnce sync.Once
+var cachedIdentity Identity
+
 func ReadIdentity() Identity {
+	identityOnce.Do(func() {
+		cachedIdentity = readIdentity()
+	})
+	return cachedIdentity
+}
+
+func readIdentity() Identity {
 	readers := identityReaders()
 	for _, reader := range readers {
 		value, source, err := reader()

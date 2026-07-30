@@ -58,9 +58,11 @@ func (ModbusRTU) WritePoint(ctx context.Context, point config.PointConfig, value
 	defer bus.mu.Unlock()
 	bus.handler.SlaveId = point.SlaveID
 	if err := writeByFunction(ctx, bus.client, point, value); err != nil {
+		recordModbusWrite("modbus-rtu", point, value, err)
 		_ = bus.handler.Close()
 		return fmt.Errorf("Modbus RTU %s slave %d write failed: %w", point.Address, point.SlaveID, err)
 	}
+	recordModbusWrite("modbus-rtu", point, value, nil)
 	return nil
 }
 
@@ -82,7 +84,9 @@ func readRTU(ctx context.Context, point config.PointConfig) ([]byte, error) {
 	}
 
 	bus.handler.SlaveId = point.SlaveID
+	recordModbusReadRequest("modbus-rtu", point)
 	raw, err := readByFunction(ctx, bus.client, point)
+	recordModbusReadResponse("modbus-rtu", point, raw, err)
 	if err != nil {
 		_ = bus.handler.Close()
 		return nil, fmt.Errorf("Modbus RTU %s slave %d read failed: %w", point.Address, point.SlaveID, err)
