@@ -7,6 +7,7 @@ const { resolve } = require('node:path');
 const { PrismaClient } = require('@prisma/client');
 const { Reflector } = require('@nestjs/core');
 const { UsersService } = require('../dist/users/users.service');
+const { SubscriptionLimitsService } = require('../dist/subscriptions/subscription-limits.service');
 const { DevicesService } = require('../dist/devices/devices.service');
 const { DeviceGroupsService } = require('../dist/devices/device-groups.service');
 const { DevicesController } = require('../dist/devices/devices.controller');
@@ -75,7 +76,7 @@ async function main() {
   await groupService.assign(actorAdmin, { deviceIds: [hiddenDevice.id], groupIds: [lineTwo.id], mode: 'ADD' });
   await db.deviceGroupMembership.create({ data: { tenantId: tenantB.id, deviceId: foreignDevice.id, groupId: foreignGroup.id } });
 
-  const users = new UsersService(db);
+  const users = new UsersService(db, new SubscriptionLimitsService(db));
   const child = await users.create(actorAdmin, {
     username: 'operator-a',
     password: 'password-123',
