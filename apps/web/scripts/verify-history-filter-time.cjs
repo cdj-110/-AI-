@@ -1,0 +1,14 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),ts=require('typescript');
+const source=fs.readFileSync('src/utils/history-filter-time.ts','utf8'),exportsObject={};
+new Function('exports',ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText)(exportsObject);
+const {historyFilterBounds,validTimeBounds,boundedFilterRange,disabledFilterDate,disabledTimeUnits}=exportsObject;
+const start=new Date(2026,9,13,13,12,54),end=new Date(2026,9,13,14,12,54),bounds=historyFilterBounds(start,end,undefined,end.getTime());
+assert.equal(disabledFilterDate(new Date(2026,9,12),bounds),true);assert.equal(disabledFilterDate(new Date(2026,9,14),bounds),true);assert.equal(disabledFilterDate(start,bounds),false);
+const hours=disabledTimeUnits(start,bounds,'hour');assert.equal(hours.includes(12),true);assert.equal(hours.includes(13),false);assert.equal(hours.includes(14),false);assert.equal(hours.includes(15),true);
+assert.equal(disabledTimeUnits(start,bounds,'minute',13).includes(11),true);assert.equal(disabledTimeUnits(start,bounds,'minute',13).includes(12),false);assert.equal(disabledTimeUnits(start,bounds,'minute',14).includes(13),true);
+assert.equal(disabledTimeUnits(start,bounds,'second',13,12).includes(53),true);assert.equal(disabledTimeUnits(start,bounds,'second',13,12).includes(54),false);assert.equal(disabledTimeUnits(start,bounds,'second',14,12).includes(55),true);
+for(const value of [null,[new Date(2020,0,1),new Date(2030,0,1)],[start,start],[end,start],[new Date('invalid'),end]])assert.deepEqual(boundedFilterRange(value,bounds),[start,end]);
+const clipped=historyFilterBounds(start,end,new Date(2026,9,13,13,30).toISOString(),end.getTime());assert.equal(clipped.min,new Date(2026,9,13,13,30).getTime());
+const multi=historyFilterBounds(new Date(2026,9,13,23,30),new Date(2026,9,14,1,30),undefined,new Date(2026,9,14,2).getTime());assert.equal(disabledFilterDate(new Date(2026,9,14),multi),false);assert.equal(disabledTimeUnits(new Date(2026,9,14),multi,'hour').includes(0),false);
+const expired=historyFilterBounds(start,end,new Date(2026,9,14).toISOString(),end.getTime());assert.equal(validTimeBounds(expired),false);assert.equal(boundedFilterRange(null,expired),null);
+console.log('PASS filter time limits: dates/hour/minute/second, inclusive boundary, clamp/manual invalid/equal/reversed, retention clipping, cross-midnight, expired range.');

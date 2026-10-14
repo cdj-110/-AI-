@@ -1,0 +1,45 @@
+{
+  "name": "@weikong/gateway-webui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vue-tsc --noEmit && vite build",
+    "test:activation-page": "node scripts/verify-activation-page.mjs",
+    "dev": "vite",
+    "test:write-errors": "node --experimental-strip-types scripts/verify-write-error-api.mjs",
+    "test:opcda-read-mode": "node --experimental-strip-types scripts/verify-opcda-read-mode.mjs",
+    "test:opcda-browse-naming": "node --experimental-strip-types scripts/verify-opcda-browse-naming.mjs",
+    "test:iec61850-browse-naming": "node --experimental-strip-types scripts/verify-iec61850-browse-naming.mjs",
+    "test:point-metric-input": "node scripts/verify-point-metric-input.mjs",
+    "test:point-table-layout": "node --experimental-strip-types scripts/verify-point-table-layout.mjs",
+    "test:table-width-persistence": "node scripts/verify-table-width-persistence.mjs",
+    "test:dlt645-layout": "node scripts/verify-dlt645-layout.mjs",
+    "test:dlt645-point-options": "node --experimental-strip-types scripts/verify-dlt645-point-options.mjs",
+    "test:data-type-labels": "node --experimental-strip-types scripts/verify-data-type-labels.mjs",
+    "test:protocol-type-labels": "node --experimental-strip-types scripts/verify-protocol-type-labels.mjs",
+    "test:table-resize-hit-area": "node --experimental-strip-types scripts/verify-table-resize-hit-area.mjs",
+    "test:live-value-pulse": "node scripts/verify-live-value-pulse.mjs",
+    "test:point-value-detail": "node --experimental-strip-types scripts/verify-point-value-detail.mjs",
+    "test:device-delete-navigation": "node scripts/verify-device-delete-navigation.mjs",
+    "test:serial-bus-protocol": "node --experimental-strip-types scripts/verify-serial-bus-protocol.mjs",
+    "test:alarm-notifications": "node --experimental-strip-types scripts/verify-alarm-notifications.mjs",
+    "test:delete-dialogs": "node scripts/verify-delete-dialogs.mjs",
+    "test:history-point-selection": "node scripts/verify-history-point-selection.mjs",
+    "test:storage-separation": "node scripts/verify-storage-separation.mjs",
+    "test:edge-tab-navigation": "node scripts/verify-edge-tab-navigation.mjs",
+    "test:ai-blueprint-theme": "node scripts/verify-ai-blueprint-theme.mjs"
+  },
+  "dependencies": {
+    "@tabler/icons-vue": "^3.46.0",
+    "pdfjs-dist": "^6.3.289",
+    "pinia": "^2.3.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.7.3",
+    "vite": "^6.0.7",
+    "vue-tsc": "^2.2.0"
+  }
+}

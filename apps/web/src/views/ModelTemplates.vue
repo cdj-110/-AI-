@@ -4,6 +4,7 @@ import { Plus, Search } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
 import { apiRequest } from '../api/request';
 import { useUserStore } from '../stores/user';
+import { hasPermission } from '../utils/permissions';
 
 interface TenantItem {
   id: string;
@@ -55,7 +56,9 @@ const formRef = ref<FormInstance>();
 const query = reactive({ keyword: '' });
 const form = reactive({ name: '', description: '', deviceType: 'DIRECT' });
 const fromDeviceForm = reactive({ deviceId: '', name: '', description: '' });
-const canManage = computed(() => userStore.userInfo?.role !== 'TENANT_USER');
+const canCreateTemplate = computed(() => hasPermission(userStore.userInfo, 'MODEL_CREATE'));
+const canEditTemplate = computed(() => hasPermission(userStore.userInfo, 'MODEL_EDIT'));
+const canDeleteTemplate = computed(() => hasPermission(userStore.userInfo, 'MODEL_DELETE'));
 const isSuperAdmin = computed(() => userStore.userInfo?.role === 'SUPER_ADMIN');
 
 const rules: FormRules = {
@@ -211,7 +214,7 @@ onMounted(loadTemplates);
         <h1 class="page-title">物模型管理</h1>
         <p class="page-description">维护可复用的设备字段模板，新建设备时可直接套用。</p>
       </div>
-      <div v-if="canManage" class="page-action-buttons">
+      <div v-if="canCreateTemplate" class="page-action-buttons">
         <el-button @click="openCreateFromDevice">从设备生成</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">新增模板</el-button>
       </div>
@@ -234,9 +237,9 @@ onMounted(loadTemplates);
         <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openMetrics(row)">字段</el-button>
-            <el-button v-if="canManage" link type="primary" @click="duplicate(row)">复制</el-button>
-            <el-button v-if="canManage" link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button v-if="canManage" link type="danger" @click="remove(row)">删除</el-button>
+            <el-button v-if="canCreateTemplate" link type="primary" @click="duplicate(row)">复制</el-button>
+            <el-button v-if="canEditTemplate" link type="primary" @click="openEdit(row)">编辑</el-button>
+            <el-button v-if="canDeleteTemplate" link type="danger" @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -276,7 +279,7 @@ onMounted(loadTemplates);
           <h3>物模型字段</h3>
           <p>字段会在新建设备选择该模板时复制到设备物模型中。</p>
         </div>
-        <div v-if="canManage" class="drawer-actions">
+        <div v-if="canEditTemplate" class="drawer-actions">
           <el-button :icon="Plus" @click="addMetric">新增字段</el-button>
           <el-button type="primary" @click="saveMetrics">保存字段</el-button>
         </div>
@@ -285,18 +288,18 @@ onMounted(loadTemplates);
         <template #empty>
           <div class="metric-empty">
             <p>暂无字段</p>
-            <el-button v-if="canManage" type="primary" plain :icon="Plus" @click="addMetric">新增字段</el-button>
+            <el-button v-if="canEditTemplate" type="primary" plain :icon="Plus" @click="addMetric">新增字段</el-button>
           </div>
         </template>
-        <el-table-column label="标识符" min-width="140"><template #default="{ row }"><el-input v-model="row.identifier" :disabled="!canManage" /></template></el-table-column>
-        <el-table-column label="显示名称" min-width="140"><template #default="{ row }"><el-input v-model="row.name" :disabled="!canManage" /></template></el-table-column>
-        <el-table-column label="类型" width="110"><template #default="{ row }"><el-select v-model="row.dataType" :disabled="!canManage"><el-option label="数字" value="NUMBER" /><el-option label="文本" value="STRING" /><el-option label="布尔" value="BOOLEAN" /><el-option label="对象" value="OBJECT" /></el-select></template></el-table-column>
-        <el-table-column label="单位" width="90"><template #default="{ row }"><el-input v-model="row.unit" :disabled="!canManage" /></template></el-table-column>
-        <el-table-column label="权限" width="110"><template #default="{ row }"><el-select v-model="row.accessMode" :disabled="!canManage"><el-option label="只读" value="READ_ONLY" /><el-option label="读写" value="READ_WRITE" /></el-select></template></el-table-column>
-        <el-table-column label="排序" width="95"><template #default="{ row }"><el-input-number v-model="row.sortOrder" class="metric-number" :min="0" controls-position="right" :disabled="!canManage" /></template></el-table-column>
-        <el-table-column label="小数位" width="95"><template #default="{ row }"><el-input-number v-model="row.decimals" class="metric-number" :min="0" :max="6" controls-position="right" :disabled="!canManage" /></template></el-table-column>
-        <el-table-column label="展示" width="70"><template #default="{ row }"><el-switch v-model="row.enabled" :disabled="!canManage" /></template></el-table-column>
-        <el-table-column v-if="canManage" label="操作" width="70"><template #default="{ $index }"><el-button link type="danger" @click="removeMetric($index)">删除</el-button></template></el-table-column>
+        <el-table-column label="标识符" min-width="140"><template #default="{ row }"><el-input v-model="row.identifier" :disabled="!canEditTemplate" /></template></el-table-column>
+        <el-table-column label="显示名称" min-width="140"><template #default="{ row }"><el-input v-model="row.name" :disabled="!canEditTemplate" /></template></el-table-column>
+        <el-table-column label="类型" width="110"><template #default="{ row }"><el-select v-model="row.dataType" :disabled="!canEditTemplate"><el-option label="数字" value="NUMBER" /><el-option label="文本" value="STRING" /><el-option label="布尔" value="BOOLEAN" /><el-option label="对象" value="OBJECT" /></el-select></template></el-table-column>
+        <el-table-column label="单位" width="90"><template #default="{ row }"><el-input v-model="row.unit" :disabled="!canEditTemplate" /></template></el-table-column>
+        <el-table-column label="权限" width="110"><template #default="{ row }"><el-select v-model="row.accessMode" :disabled="!canEditTemplate"><el-option label="只读" value="READ_ONLY" /><el-option label="读写" value="READ_WRITE" /></el-select></template></el-table-column>
+        <el-table-column label="排序" width="95"><template #default="{ row }"><el-input-number v-model="row.sortOrder" class="metric-number" :min="0" controls-position="right" :disabled="!canEditTemplate" /></template></el-table-column>
+        <el-table-column label="小数位" width="95"><template #default="{ row }"><el-input-number v-model="row.decimals" class="metric-number" :min="0" :max="6" controls-position="right" :disabled="!canEditTemplate" /></template></el-table-column>
+        <el-table-column label="展示" width="70"><template #default="{ row }"><el-switch v-model="row.enabled" :disabled="!canEditTemplate" /></template></el-table-column>
+        <el-table-column v-if="canEditTemplate" label="操作" width="70"><template #default="{ $index }"><el-button link type="danger" @click="removeMetric($index)">删除</el-button></template></el-table-column>
       </el-table>
     </el-drawer>
   </div>

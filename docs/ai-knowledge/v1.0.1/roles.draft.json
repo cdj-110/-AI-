@@ -1,0 +1,154 @@
+{
+  "schema_version": "1.0",
+  "knowledge_version": "1.0.1",
+  "status": "draft",
+  "executable": false,
+  "enforcement_implemented": false,
+  "description": "设计约束示例，不是可直接加载的 LangGraph 或平台权限配置。",
+  "required_context": [
+    "BASELINE.md",
+    "OPEN-QUESTIONS.md",
+    "SOURCES.md"
+  ],
+  "proposed_limits": {
+    "concurrent_development_tasks": 1,
+    "max_repair_rounds": 3,
+    "cost_budget": null,
+    "timeout_seconds": null
+  },
+  "default_denied": [
+    "production_credentials",
+    "production_write",
+    "real_device_control",
+    "merge_main",
+    "approve_own_work",
+    "change_approval_policy"
+  ],
+  "roles": [
+    {
+      "id": "knowledge_curator",
+      "name": "知识管理员",
+      "allowed_in_draft": [
+        "read_authorized_sources",
+        "write_knowledge_draft"
+      ],
+      "required_outputs": [
+        "evidence_register",
+        "conflict_register",
+        "version_change"
+      ]
+    },
+    {
+      "id": "planner_architect",
+      "name": "规划与架构",
+      "allowed_in_draft": [
+        "read_authorized_sources",
+        "write_task_plan"
+      ],
+      "required_outputs": [
+        "task_plan",
+        "acceptance_criteria",
+        "risk_register"
+      ]
+    },
+    {
+      "id": "cloud_developer",
+      "name": "云平台开发",
+      "allowed_in_draft": [
+        "edit_scoped_workspace",
+        "run_isolated_checks"
+      ],
+      "required_outputs": [
+        "code_diff",
+        "contract_changes",
+        "test_evidence"
+      ]
+    },
+    {
+      "id": "gateway_protocol_developer",
+      "name": "网关与协议开发",
+      "allowed_in_draft": [
+        "edit_scoped_workspace",
+        "run_protocol_simulators"
+      ],
+      "required_outputs": [
+        "code_diff",
+        "capability_matrix",
+        "build_metadata",
+        "test_evidence"
+      ]
+    },
+    {
+      "id": "security_reviewer",
+      "name": "安全审查",
+      "allowed_in_draft": [
+        "read_candidate_diff",
+        "read_test_evidence"
+      ],
+      "required_outputs": [
+        "security_findings",
+        "unresolved_risks"
+      ]
+    },
+    {
+      "id": "qa_performance",
+      "name": "测试与性能",
+      "allowed_in_draft": [
+        "run_isolated_checks",
+        "write_test_report"
+      ],
+      "required_outputs": [
+        "test_report",
+        "coverage_gaps",
+        "performance_context"
+      ]
+    },
+    {
+      "id": "commercial_analyst",
+      "name": "商业规则分析",
+      "allowed_in_draft": [
+        "read_approved_business_inputs",
+        "write_rule_draft"
+      ],
+      "required_outputs": [
+        "entitlement_rules",
+        "cost_assumptions",
+        "approval_questions"
+      ]
+    },
+    {
+      "id": "release_preparer",
+      "name": "发布准备",
+      "allowed_in_draft": [
+        "read_candidate_artifacts",
+        "write_release_manifest"
+      ],
+      "required_outputs": [
+        "candidate_sha",
+        "artifact_digests",
+        "rollback_plan",
+        "human_review_request"
+      ]
+    }
+  ],
+  "human_gates": {
+    "identities_configured": false,
+    "merge": "human_review",
+    "production": "human_approval_bound_to_candidate",
+    "approval_binding": [
+      "repository",
+      "commit_sha",
+      "artifact_digest",
+      "target_environment",
+      "config_version",
+      "migration_version",
+      "rollback_plan"
+    ],
+    "invalidate_on_candidate_change": true
+  },
+  "execution_prerequisites": [
+    "Approve role policy and actual identities",
+    "Implement external enforcement and isolated test environments",
+    "Resolve only the open questions that block the specific task"
+  ]
+}

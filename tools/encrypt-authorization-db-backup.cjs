@@ -1,0 +1,11 @@
+const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+const base=path.resolve(__dirname,'../secrets/authorization-20260916');
+const raw=fs.readFileSync(path.join(base,'weikong-before-authorization.dump'));
+const password=fs.readFileSync(path.join(base,'backup-recovery-password.txt'),'utf8').trim();
+const salt=crypto.randomBytes(16),iv=crypto.randomBytes(12),key=crypto.scryptSync(password,salt,32,{N:32768,maxmem:128*1024*1024});
+const cipher=crypto.createCipheriv('aes-256-gcm',key,iv);const data=Buffer.concat([cipher.update(raw),cipher.final()]);
+const envelope={version:1,kdf:'scrypt',N:32768,salt:salt.toString('base64'),iv:iv.toString('base64'),tag:cipher.getAuthTag().toString('base64'),data:data.toString('base64')};
+const decipher=crypto.createDecipheriv('aes-256-gcm',key,iv);decipher.setAuthTag(cipher.getAuthTag());
+if(!Buffer.concat([decipher.update(data),decipher.final()]).equals(raw))throw new Error('DB encrypted backup verification failed');
+fs.writeFileSync(path.join(base,'database-backup.aesgcm.json'),JSON.stringify(envelope),{mode:0o600,flag:'wx'});
+console.log(JSON.stringify({databaseBackupBytes:raw.length,sha256:crypto.createHash('sha256').update(raw).digest('hex'),encryptedBackupVerified:true}));

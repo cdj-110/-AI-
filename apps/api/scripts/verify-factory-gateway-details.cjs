@@ -1,0 +1,20 @@
+require('reflect-metadata');
+const assert = require('node:assert/strict');
+const {FactoryGatewaysService} = require('../dist/factory-gateways/factory-gateways.service');
+const {FactoryGatewaysController} = require('../dist/factory-gateways/factory-gateways.controller');
+const {RolesGuard} = require('../dist/common/guards/roles.guard');
+const {Reflector} = require('@nestjs/core');
+(async()=>{
+  let options;
+  const row={id:'test',sn:'TEST',status:'UNBOUND',licenseSequence:6,product:{code:'EG100',rs232PortCount:2,rs485PortCount:2},issuedLicense:{licenseSequence:6},deviceSecretHash:'secret',activationSecretEncrypted:'secret',bindCodeHash:'secret',bindCodeEncrypted:'secret',nfcTokenHash:'secret',nfcTokenEncrypted:'secret'};
+  const prisma={factoryGateway:{findMany:args=>{options=args;return Promise.resolve([row]);},count:()=>Promise.resolve(1)},$transaction:promises=>Promise.all(promises)};
+  const result=await new FactoryGatewaysService(prisma,{}).findAll(1,10,'20260917-EG100-005');
+  assert.equal(options.include.product,true);
+  assert.equal(options.where.status.not,'REMOVED');
+  for(const field of ['hardwareId','chipUsid','sn','batchNo']) assert.ok(options.where.OR.some(filter=>filter[field]?.contains==='20260917-EG100-005'));
+  assert.equal(result.items[0].product.rs232PortCount,2);
+  for(const key of ['deviceSecretHash','activationSecretEncrypted','bindCodeHash','bindCodeEncrypted','nfcTokenHash','nfcTokenEncrypted']) assert.equal(result.items[0][key],undefined);
+  const guard=new RolesGuard(new Reflector());
+  for(const role of ['SUPER_ADMIN','TENANT_ADMIN','TENANT_USER']) assert.equal(guard.canActivate({getHandler:()=>FactoryGatewaysController.prototype.findAll,getClass:()=>FactoryGatewaysController,switchToHttp:()=>({getRequest:()=>({user:{role}})})}),role==='SUPER_ADMIN');
+  console.log('Passed: product detail inclusion, batch/identity search, removed-row exclusion, secret redaction and super-admin list permissions. No database mutations.');
+})().catch(e=>{console.error(e);process.exitCode=1;});

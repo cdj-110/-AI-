@@ -1,0 +1,9 @@
+/var/log/weikong-gateway/gateway.log {
+    size 2M
+    rotate 5
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

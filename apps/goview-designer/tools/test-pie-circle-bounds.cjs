@@ -1,0 +1,20 @@
+const fs = require('fs'), path = require('path'), assert = require('node:assert/strict')
+const { parse, compileScript, compileTemplate } = require('@vue/compiler-sfc')
+const root = path.resolve(__dirname, '../src/packages/components/Charts/Pies/PieCircle')
+const config = fs.readFileSync(path.join(root, 'config.ts'), 'utf8')
+assert.match(config, /w: 200, h: 200/)
+assert.match(config, /radius: \["85%", "90%"\]/)
+// 外圆半径90，200px边框每侧10px余量，足够默认10px光晕。
+assert.equal((200 - 200 * .9) / 2, 10)
+for (const filename of ['index.vue', 'config.vue']) {
+  const file = path.join(root, filename)
+  const { descriptor, errors } = parse(fs.readFileSync(file, 'utf8'), { filename: file })
+  assert.deepEqual(errors, [])
+  compileScript(descriptor, { id: 'pie-circle' })
+  const result = compileTemplate({ source: descriptor.template.content, filename: file, id: 'pie-circle', compilerOptions: { expressionPlugins: ['typescript'] } })
+  assert.deepEqual(result.errors, [])
+}
+const settings = fs.readFileSync(path.join(root, 'config.vue'), 'utf8')
+assert.match(settings, /value: '85%'/)
+assert.match(settings, /value: '75%'/)
+console.log('PASS: square initial bounds, glow padding, new radius option, legacy radius option and SFC compilation')

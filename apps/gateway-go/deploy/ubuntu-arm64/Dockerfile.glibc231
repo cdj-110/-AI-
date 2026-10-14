@@ -1,0 +1,14 @@
+FROM golang:1.25-bookworm
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       binutils-aarch64-linux-gnu ca-certificates ubuntu-keyring \
+    && echo 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://archive.ubuntu.com/ubuntu focal main universe' >/etc/apt/sources.list.d/focal.list \
+    && printf 'Package: *-arm64-cross\nPin: release n=focal\nPin-Priority: 1001\n' >/etc/apt/preferences.d/focal-cross \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       gcc-9-aarch64-linux-gnu=9.3.0-10ubuntu1cross2 \
+       libc6-dev-arm64-cross=2.31-0ubuntu7cross1 \
+       linux-libc-dev-arm64-cross=5.4.0-21.25cross1 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src

@@ -1,0 +1,9 @@
+{
+  "repository": "C:/path/to/isolated-repository",
+  "state_dir": "C:/path/to/private-task-state",
+  "codex": "C:/path/to/codex.exe",
+  "github_repository": "cdj-110/-AI-",
+  "sync_main_before_task": true,
+  "model_timeout_seconds": 300,
+  "test_images": {}
+}

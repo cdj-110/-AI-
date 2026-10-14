@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict'
+import {readFileSync} from 'node:fs'
+import {updatePersistentAlarmNotifications as update,detectNewActiveAlarms} from '../src/alarmNotifications.ts'
+import {acknowledgeCardEvents} from '../src/alarmCardAcknowledge.ts'
+const event=(id,extra={})=>({eventId:id,ruleId:id,parentRuleId:'four',ruleName:id,deviceKey:'d',metric:'p',state:'ACTIVE',level:'CRITICAL',acknowledged:false,retainAfterAcknowledged:true,occurredAt:'2026-09-14T00:00:00Z',...extra})
+const high=event('high'),hh=event('hh',{limitKey:'highHigh'})
+let cards=update([],[high,hh])
+const group=cards[0].groupId,revision=cards[0].revision
+let events=[high,hh].map(e=>({...e,acknowledged:true}))
+cards=update(cards,events)
+assert.equal(cards.length,1)
+assert.equal(cards[0].groupId,group)
+assert.equal(cards[0].revision,revision)
+assert.ok(cards[0].events.every(e=>e.acknowledged))
+assert.equal(update([],events).length,1,'reopening or a second tab must retain acknowledged cards')
+assert.deepEqual(detectNewActiveAlarms(new Set(),{active:events},true).events,[],'retained cards never reopen panel automatically')
+assert.equal(update(cards,events.map(e=>({...e,retainAfterAcknowledged:false}))).length,0)
+assert.equal(update(cards,events.map(e=>({...e,popupEnabled:false}))).length,0)
+assert.equal(update(cards,events.map(e=>({...e,state:'RESOLVED'}))).length,0)
+assert.equal(update(cards,[events[0]]).length,1,'partially recovered group remains')
+assert.equal(update([], [event('legacy',{acknowledged:true,retainAfterAcknowledged:undefined})]).length,0)
+const fresh=event('hh-new')
+cards=update(cards,[events[0],fresh])
+assert.equal(cards.length,1)
+assert.equal(cards[0].events.filter(e=>!e.acknowledged).length,1)
+const sent=[]
+const result=await acknowledgeCardEvents(cards[0].events,async id=>sent.push(id))
+assert.deepEqual(sent,['hh-new'],'only new unacknowledged limit is confirmed')
+assert.equal(result.error,'')
+const source=f=>readFileSync(new URL('../src/'+f,import.meta.url),'utf8')
+assert.ok(source('components/AlarmView.vue').includes('v-model="editing.retainAfterAcknowledged"'))
+assert.ok(source('components/AlarmNotificationCard.vue').includes('已知晓 · 等待恢复'))
+assert.ok(source('components/AlarmNotificationCard.vue').includes(':disabled="acknowledging||allAcknowledged"'))
+assert.ok(source('components/AlarmNotificationCard.vue').includes('.critical:not(.acknowledged)'))
+assert.ok(source('alarmPresentation.ts').includes("!e.acknowledged&&e.state==='ACTIVE'"),'retention must not resume acknowledged alarm audio')
+for(const path of ['App.vue','components/AlarmWindow.vue'])assert.ok(source(path).includes('updatePersistentAlarmNotifications'))
+console.log('PASS retained/legacy cards, policy changes, recovery, reopen, no repeat popup/audio, grouped new limits, settings and acknowledgement UI')

@@ -1,0 +1,50 @@
+require('reflect-metadata');
+const assert = require('node:assert/strict');
+const { generateKeyPairSync, verify } = require('node:crypto');
+const bcrypt = require('bcryptjs');
+const { FactoryGatewaysService } = require('../dist/factory-gateways/factory-gateways.service');
+
+(async () => {
+ const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+ const values = { ACTIVATION_SIGNING_KEY_ID:'test-key', ACTIVATION_SIGNING_PRIVATE_KEY:privateKey.export({format:'der',type:'pkcs8'}).toString('base64'), FACTORY_CREDENTIAL_ENCRYPTION_KEY:'test-only-credential-key' };
+ const settings = { get:(name,fallback)=>values[name] ?? fallback };
+ let updates=0;
+ const product={code:'EG100',ethernetPortCount:2,rs232PortCount:2,rs485PortCount:2,canPortCount:0,supports4G:true,supportsWifi:true};
+ const gateway={id:'test-id',hardwareId:'A'.repeat(32),chipUsid:'B'.repeat(16),sn:'WK-TEST',status:'BOUND',deviceId:'test-device',licenseSequence:2,deviceSecretHash:await bcrypt.hash('test-device-secret',4),product};
+ const prisma={factoryGateway:{findUnique:async({where})=>where.id ? gateway : null,update:async({where,data})=>{assert.equal(where.licenseSequence,2);updates++;return {...gateway,...data};}}};
+ const service=new FactoryGatewaysService(prisma,settings);
+ gateway.activationSecretEncrypted=service.encryptCredential('test-device-secret','activation-secret');
+ const result=await service.resetActivation(gateway.id);
+ assert.equal(result.activationFile.licenseVersion,2);
+ assert.equal(result.activationFile.keyId,'test-key');
+ assert.equal(result.activationFile.licenseSequence,3);
+ assert.equal(result.activationFile.productModel,'EG100');
+ assert.deepEqual(result.activationFile.hardwareProfile,{ethernetPortCount:2,rs232PortCount:2,rs485PortCount:2,canPortCount:0,supports4G:true,supportsWifi:true});
+ assert.equal(result.deviceSecret,'test-device-secret');
+ assert.equal(result.activationSecretEncrypted,undefined);
+ assert.equal(result.deviceSecretHash,undefined);
+ const {signature,...payload}=result.activationFile;
+ assert.ok(verify(null,Buffer.from(JSON.stringify(payload)),publicKey,Buffer.from(signature,'base64')));
+ assert.equal(payload.expiresAt,'','new licenses must default to perpetual');
+ assert.equal(verify(null,Buffer.from(JSON.stringify({...payload,expiresAt:'2036-09-17T00:00:00Z'})),publicKey,Buffer.from(signature,'base64')),false,'expiry is not protected by signature');
+ assert.equal(verify(null,Buffer.from(JSON.stringify({...payload,hardwareProfile:{...payload.hardwareProfile,ethernetPortCount:4}})),publicKey,Buffer.from(signature,'base64')),false,'hardware profile is not protected by signature');
+ values.ACTIVATION_LICENSE_DAYS='3650';
+ const timed=service.createActivationFile({...gateway,deviceSecret:'test-device-secret',licenseSequence:3,product});
+ assert.equal(new Date(timed.expiresAt)-new Date(timed.issuedAt),3650*86400000,'explicit timed licenses lost their expiry');
+ assert.throws(()=>service.createActivationFile({...gateway,deviceSecret:'test-device-secret',licenseSequence:3,product:{...product,canPortCount:null}}),/硬件规格不完整/,'incomplete product catalog still issued a hardware license');
+ for(const days of ['-1','invalid','1.5','365001']){
+  values.ACTIVATION_LICENSE_DAYS=days;
+  assert.throws(()=>service.createActivationFile({...gateway,deviceSecret:'test-device-secret',licenseSequence:3,product}),'invalid expiry configuration silently produced perpetual license');
+ }
+ delete values.ACTIVATION_LICENSE_DAYS;
+ assert.equal(updates,1);
+ updates=0;delete values.ACTIVATION_SIGNING_PRIVATE_KEY;
+ await assert.rejects(()=>service.resetActivation(gateway.id));assert.equal(updates,0,'signing failure mutated credentials');
+ values.ACTIVATION_SIGNING_PRIVATE_KEY=privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
+ gateway.activationSecretEncrypted=null;
+ await assert.rejects(()=>service.resetActivation(gateway.id));assert.equal(updates,0,'legacy missing secret was silently reset');
+ await assert.rejects(()=>service.backfillIdentity(gateway.id,{hardwareId:gateway.hardwareId,chipUsid:gateway.chipUsid,deviceSecret:'wrong-secret'}));assert.equal(updates,0);
+ delete values.FACTORY_CREDENTIAL_ENCRYPTION_KEY;
+ assert.throws(()=>service.encryptCredential('secret','activation-secret'),'missing encryption key accepted');
+ console.log('License security checks passed: signature, sequence, safe reissue, secret redaction, failure recovery, legacy credential validation.');
+})().catch(error=>{console.error(error);process.exitCode=1;});

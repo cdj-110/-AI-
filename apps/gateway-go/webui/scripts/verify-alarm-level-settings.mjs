@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict'
+import {normalizeAlarmSoundSettings,alarmLevelSettings,alarmLevels} from '../src/alarmSound.ts'
+const legacy=normalizeAlarmSoundSettings({enabled:true,mode:'once',tone:'bell',volume:35,criticalOnly:true})
+assert.deepEqual(alarmLevelSettings(legacy,'CRITICAL'),{enabled:true,mode:'once',tone:'file-alarm2',volume:35,color:'#e5484d',customAudio:undefined})
+assert.equal(alarmLevelSettings(legacy,'INFO').enabled,false)
+assert.equal(alarmLevelSettings(legacy,'WARNING').enabled,false)
+const edited=normalizeAlarmSoundSettings({...legacy,levels:{...legacy.levels,WARNING:{enabled:true,mode:'loop',tone:'buzzer',volume:80,color:'#00aAbb'}}})
+assert.equal(edited.levels.WARNING.color,'#00aabb')
+assert.equal(edited.levels.CRITICAL.volume,35)
+assert.equal(edited.levels.WARNING.volume,80)
+assert.deepEqual(normalizeAlarmSoundSettings(JSON.parse(JSON.stringify(edited))),edited)
+const corrupt=normalizeAlarmSoundSettings({levels:{CRITICAL:{volume:Infinity,color:'url(javascript:bad)',mode:'bad',tone:'bad'},INFO:{volume:-5},WARNING:{volume:900,color:'#fff'}}})
+assert.equal(corrupt.levels.CRITICAL.color,'#e5484d');assert.equal(corrupt.levels.CRITICAL.volume,60)
+assert.equal(corrupt.levels.INFO.volume,0);assert.equal(corrupt.levels.WARNING.volume,100)
+assert.equal(corrupt.levels.WARNING.color,'#d49a23')
+for(const level of alarmLevels)assert.equal(normalizeAlarmSoundSettings({}).levels[level.key].enabled,true)
+console.log('Alarm level settings passed: legacy migration, independent settings, serialization, invalid color rejection and volume bounds')

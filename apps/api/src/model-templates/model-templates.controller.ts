@@ -7,9 +7,12 @@ import { CreateTemplateFromDeviceDto } from './dto/create-template-from-device.d
 import { CreateModelTemplateDto } from './dto/create-model-template.dto';
 import { SaveModelTemplateMetricsDto, UpdateModelTemplateDto } from './dto/update-model-template.dto';
 import { ModelTemplatesService } from './model-templates.service';
+import { Permissions } from '../common/decorators/permissions.decorator';
+import { PermissionsGuard } from '../common/guards/permissions.guard';
 
 @Controller('model-templates')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+@Permissions('MODEL_VIEW')
 export class ModelTemplatesController {
   constructor(private readonly modelTemplatesService: ModelTemplatesService) {}
 
@@ -21,18 +24,21 @@ export class ModelTemplatesController {
 
   @Get('options')
   @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('MODEL_VIEW', 'DEVICE_CREATE')
   options(@CurrentUser() user: AuthUser) {
     return this.modelTemplatesService.options(user);
   }
 
   @Post('from-device')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('MODEL_CREATE')
   createFromDevice(@CurrentUser() user: AuthUser, @Body() dto: CreateTemplateFromDeviceDto) {
     return this.modelTemplatesService.createFromDevice(user, dto);
   }
 
   @Post(':id/duplicate')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('MODEL_CREATE')
   duplicate(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.modelTemplatesService.duplicate(user, id);
   }
@@ -44,25 +50,29 @@ export class ModelTemplatesController {
   }
 
   @Post()
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('MODEL_CREATE')
   create(@CurrentUser() user: AuthUser, @Body() dto: CreateModelTemplateDto) {
     return this.modelTemplatesService.create(user, dto);
   }
 
   @Patch(':id')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('MODEL_EDIT')
   update(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: UpdateModelTemplateDto) {
     return this.modelTemplatesService.update(user, id, dto);
   }
 
   @Put(':id/metrics')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('MODEL_EDIT')
   saveMetrics(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: SaveModelTemplateMetricsDto) {
     return this.modelTemplatesService.saveMetrics(user, id, dto.metrics ?? []);
   }
 
   @Delete(':id')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('MODEL_DELETE')
   remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.modelTemplatesService.remove(user, id);
   }

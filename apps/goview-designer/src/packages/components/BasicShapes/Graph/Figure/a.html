@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>可拖拽多锚点线段</title>
+    <style>
+        canvas {
+            border: 1px solid #999;
+            background: #f8f8f8;
+            cursor: crosshair;
+        }
+    </style>
+</head>
+<body>
+<canvas id="canvas" width="800" height="500"></canvas>
+
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    // 锚点数组 [{x,y}]，初始两个点
+    let points = [
+        { x: 100, y: 200 },
+        { x: 600, y: 300 }
+    ];
+    let dragIndex = -1; // 当前拖拽锚点下标 -1无拖拽
+    let hoverIndex = -1; // 鼠标悬浮锚点下标
+
+    // 工具函数：两点距离
+    function getDist(p1, p2) {
+        return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    }
+
+    // 判断鼠标点是否在线段 p0-p1 上（容差5像素）
+    function isPointOnSegment(mouse, p0, p1, tolerance = 5) {
+        const len = getDist(p0, p1);
+        const d1 = getDist(mouse, p0);
+        const d2 = getDist(mouse, p1);
+        // 超出线段两端直接返回false
+        if (d1 > len + tolerance || d2 > len + tolerance) return false;
+        // 三角形面积求点到直线距离
+        const cross = Math.abs((p1.x - p0.x) * (p0.y - mouse.y) - (p1.y - p0.y) * (p0.x - mouse.x));
+        const distLine = cross / len;
+        return distLine < tolerance;
+    }
+
+    // 获取鼠标在线段上的插入位置（返回区间下标，-1不在任意线段）
+    function getInsertSegmentIndex(mouse) {
+        for (let i = 0; i < points.length - 1; i++) {
+            const p0 = points[i];
+            const p1 = points[i + 1];
+            if (isPointOnSegment(mouse, p0, p1)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // 绘制全部
+    function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // 绘制连线
+        ctx.beginPath();
+        ctx.strokeStyle = '#222';
+        ctx.lineWidth = 3;
+        ctx.moveTo(points[0].x, points[0].y);
+        for (let i = 1; i < points.length; i++) {
+            ctx.lineTo(points[i].x, points[i].y);
+        }
+        ctx.stroke();
+
+        // 绘制锚点
+        const r = 8;
+        points.forEach((p, idx) => {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+            // 拖拽中/hover区分颜色
+            if (dragIndex === idx) {
+                ctx.fillStyle = '#f44336';
+            } else if (hoverIndex === idx) {
+                ctx.fillStyle = '#ff9800';
+            } else {
+                ctx.fillStyle = '#2196f3';
+            }
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        });
+    }
+
+    // 获取画布鼠标坐标
+    function getCanvasPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top
+        };
+    }
+
+    canvas.addEventListener("dblclick", (e) => {
+        const m = getCanvasPos(e);
+        // 没点锚点，检测是否在线段上，新增锚点
+        const segIdx = getInsertSegmentIndex(m);
+        if (segIdx !== -1) {
+            // 在segIdx 和 segIdx+1 中间插入新点
+            points.splice(segIdx + 1, 0, { x: m.x, y: m.y });
+            // dragIndex = segIdx + 1; // 直接拖拽新点
+            render();
+        }
+    })
+
+    // 鼠标按下
+    canvas.addEventListener('mousedown', (e) => {
+        const m = getCanvasPos(e);
+        dragIndex = -1;
+        // 先检测是否点到锚点
+        for (let i = 0; i < points.length; i++) {
+            if (getDist(m, points[i]) < 10) {
+                dragIndex = i;
+                render();
+                return;
+            }
+        }
+    });
+
+    // 鼠标移动
+    canvas.addEventListener('mousemove', (e) => {
+        const m = getCanvasPos(e);
+        hoverIndex = -1;
+        // 拖拽锚点
+        if (dragIndex !== -1) {
+            points[dragIndex].x = m.x;
+            points[dragIndex].y = m.y;
+            render();
+            return;
+        }
+        // 检测hover锚点
+        for (let i = 0; i < points.length; i++) {
+            if (getDist(m, points[i]) < 10) {
+                hoverIndex = i;
+                break;
+            }
+        }
+        render();
+    });
+
+    // 鼠标松开
+    canvas.addEventListener('mouseup', () => {
+        dragIndex = -1;
+        render();
+    });
+    canvas.addEventListener('mouseleave', () => {
+        dragIndex = -1;
+        hoverIndex = -1;
+        render();
+    });
+
+    // 初始渲染
+    render();
+</script>
+</body>
+</html>

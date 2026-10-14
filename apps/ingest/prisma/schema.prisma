@@ -11,8 +11,11 @@ model Tenant {
   id        String   @id @default(uuid())
   name      String
   status    String   @default("ACTIVE")
+  deviceCloudAccessDisabled Boolean @default(false)
   devices   Device[]
+  deviceGroups DeviceGroup[]
   alarms    Alarm[]
+  gatewayEvents GatewayEvent[]
   deviceLogs DeviceLog[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -22,7 +25,7 @@ model Device {
   id                    String    @id @default(uuid())
   tenantId              String
   tenant                Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  deviceKey             String    @unique
+  deviceKey             String
   mqttClientId          String    @unique
   mqttUsername          String    @unique
   mqttPasswordHash      String
@@ -31,22 +34,162 @@ model Device {
   gatewayId             String?
   gateway               Device?   @relation("GatewayChildren", fields: [gatewayId], references: [id], onDelete: SetNull)
   children              Device[]  @relation("GatewayChildren")
+  groupId               String?
+  group                 DeviceGroup? @relation(fields: [groupId, tenantId], references: [id, tenantId], onDelete: NoAction, onUpdate: NoAction)
   name                  String
   protocol              String    @default("MQTT")
   status                String    @default("OFFLINE")
+  cloudAccessEnabled    Boolean   @default(true)
+  cloudDisabledAt       DateTime?
+  cloudDisabledBy       String?
+  cloudDisabledReason   String?
   location              String?
   lastSeenAt            DateTime?
+  reportedConfig        Json?
+  reportedConfigAt      DateTime?
   alarms                Alarm[]
+  reportedEvents        GatewayEvent[] @relation("GatewayEventGateway")
+  originatedEvents      GatewayEvent[] @relation("GatewayEventSource")
   metrics               DeviceMetric[]
   alarmRules            DeviceAlarmRule[]
   logs                  DeviceLog[]
+  factoryGateway        FactoryGateway?
+  remoteConfigTasks     RemoteConfigTask[]
+  commands              DeviceCommand[] @relation("CommandDevice")
+  routedCommands        DeviceCommand[] @relation("CommandGateway")
+  topologyDrafts        GatewayTopologyDraft[] @relation("GatewayTopologyDraftGateway")
+  childCloudRestrictions GatewayChildCloudRestriction[] @relation("GatewayChildCloudRestrictions")
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
   @@index([tenantId])
+  @@index([tenantId, groupId])
   @@index([status])
+  @@index([cloudAccessEnabled])
   @@index([deviceType])
   @@index([gatewayId])
+  @@index([gatewayId, deviceKey])
+}
+
+model DeviceGroup {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String   @db.VarChar(50)
+  devices   Device[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([id, tenantId])
+  @@unique([tenantId, name])
+}
+
+model GatewayChildCloudRestriction {
+  id              String   @id @default(uuid())
+  gatewayDeviceId String
+  gateway         Device   @relation("GatewayChildCloudRestrictions", fields: [gatewayDeviceId], references: [id], onDelete: Cascade)
+  childDeviceKey  String
+  disabledAt      DateTime @default(now())
+  disabledBy      String?
+  reason          String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([gatewayDeviceId, childDeviceKey])
+  @@index([childDeviceKey])
+  @@index([disabledAt])
+}
+
+model DeviceCommand {
+  id          String @id @default(uuid())
+  requestId   String @unique
+  deviceId    String
+  device      Device @relation("CommandDevice", fields: [deviceId], references: [id], onDelete: Cascade)
+  gatewayId   String
+  gateway     Device @relation("CommandGateway", fields: [gatewayId], references: [id], onDelete: Cascade)
+  deviceKey   String
+  metric      String
+  value       Json
+  status      String @default("SENT")
+  message     String?
+  createdBy   String
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+  completedAt DateTime?
+
+  @@index([deviceId, createdAt])
+  @@index([status, expiresAt])
+}
+
+model RemoteConfigTask {
+  id                String    @id @default(uuid())
+  deviceId          String
+  device            Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  version           Int
+  status            String    @default("PENDING")
+  config             Json
+  createdBy          String
+  error              String?
+  sentAt             DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([deviceId, version])
+  @@index([deviceId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model GatewayTopologyDraft {
+  id                    String    @id @default(uuid())
+  gatewayDeviceId       String
+  gateway               Device    @relation("GatewayTopologyDraftGateway", fields: [gatewayDeviceId], references: [id], onDelete: Cascade)
+  gatewayKey            String
+  reportedConfigVersion String?
+  items                 Json
+  status                String    @default("PENDING")
+  conflicts             Json?
+  reportedAt            DateTime  @default(now())
+  confirmedAt           DateTime?
+  confirmedBy           String?
+  ignoredAt             DateTime?
+  ignoredBy             String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([gatewayDeviceId])
+  @@index([gatewayKey])
+  @@index([status])
+  @@index([reportedAt])
+}
+
+model FactoryGateway {
+  id               String    @id @default(uuid())
+  hardwareId       String    @unique
+  sn               String    @unique
+  deviceSecretHash String
+  activationSecretEncrypted String?
+  licenseSequence Int @default(0)
+  issuedLicense Json?
+  reportedLicense Json?
+  licenseActivatedAt DateTime?
+  licenseReportedAt DateTime?
+  bindCodeHash     String
+  status           String    @default("UNBOUND")
+  batchNo          String?
+  deviceId         String?   @unique
+  device           Device?   @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  producedAt       DateTime?
+  firstSeenAt      DateTime?
+  lastSeenAt       DateTime?
+  boundAt          DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([status])
+  @@index([batchNo])
+  @@index([lastSeenAt])
 }
 
 model DeviceMetric {
@@ -105,6 +248,51 @@ model Alarm {
   @@index([tenantId])
   @@index([deviceId])
   @@index([status])
+}
+
+model GatewayEvent {
+  id              String    @id @default(uuid())
+  dedupeKey       String    @unique
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  gatewayId       String
+  gateway         Device    @relation("GatewayEventGateway", fields: [gatewayId], references: [id], onDelete: Cascade)
+  deviceId        String?
+  device          Device?   @relation("GatewayEventSource", fields: [deviceId], references: [id], onDelete: SetNull)
+  sourceEventId   String
+  eventType       String    @default("ALARM")
+  state           String
+  level           String
+  ruleId          String?
+  ruleName        String?
+  parentRuleId    String?
+  parentRuleName  String?
+  limitKey        String?
+  limitName       String?
+  deviceKey       String?
+  pointName       String?
+  metric          String?
+  valueText       String?
+  unit            String?
+  threshold       Float?
+  quality         String?
+  message         String
+  acknowledged    Boolean   @default(false)
+  occurredAt      DateTime
+  sourceUpdatedAt DateTime
+  acknowledgedAt  DateTime?
+  recoveredAt     DateTime?
+  reportedAt      DateTime
+  detail          Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([tenantId, occurredAt])
+  @@index([gatewayId, occurredAt])
+  @@index([deviceId, occurredAt])
+  @@index([state, occurredAt])
+  @@index([level, occurredAt])
+  @@index([sourceEventId])
 }
 
 model DeviceLog {

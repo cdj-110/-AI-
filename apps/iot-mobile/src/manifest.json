@@ -1,0 +1,39 @@
+{
+  "name": "物联云",
+  "appid": "__UNI__WEIKONGIOT",
+  "description": "微控物联云移动客户端",
+  "versionName": "0.1.8",
+  "versionCode": "108",
+  "transformPx": false,
+  "app-plus": {
+    "usingComponents": true,
+    "splashscreen": {
+      "alwaysShowBeforeRender": true,
+      "waiting": true,
+      "autoclose": true,
+      "delay": 0
+    },
+    "distribute": {
+      "android": {
+        "permissions": [
+          "<uses-permission android:name=\"android.permission.INTERNET\" />",
+          "<uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\" />"
+        ]
+      },
+      "ios": {}
+    }
+  },
+  "h5": {
+    "title": "物联云"
+  },
+  "mp-weixin": {
+    "appid": "",
+    "setting": {
+      "urlCheck": true,
+      "es6": true,
+      "postcss": true,
+      "minified": true
+    },
+    "usingComponents": true
+  }
+}

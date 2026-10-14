@@ -1,0 +1,284 @@
+{
+  "schema_version": "1.0",
+  "knowledge_version": "1.0.1",
+  "as_of": "2026-10-09",
+  "timezone": "Asia/Shanghai",
+  "coverage": "关键事实与废弃口径；完整待确认清单见 OPEN-QUESTIONS.md",
+  "repository_access": {
+    "github_accessed": false,
+    "original_project_modified": false,
+    "local_worktree_read": true,
+    "local_head": "02e1ff59f86bc424855dcf99f4a6c066534f0cfd",
+    "tracked_changed_entries": 458,
+    "runtime_tests_run": false
+  },
+  "claims": [
+    {
+      "id": "C-01",
+      "status": "confirmed",
+      "evidence_level": "user_statement",
+      "statement": "GitHub 托管与最终人工审批",
+      "scope": "项目意图；未访问远端",
+      "sources": [
+        "S-01",
+        "S-02"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-02",
+      "status": "confirmed",
+      "evidence_level": "local_file",
+      "statement": "Vue3/Vite/TypeScript 与 NestJS 清单存在",
+      "scope": "当前本地工作树；非运行版本",
+      "sources": [
+        "S-06"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-03",
+      "status": "confirmed",
+      "evidence_level": "user_statement",
+      "statement": "用户已更正数据库口径为云平台 PostgreSQL/TimescaleDB、网关 MySQL 输出；2核2GB 与 EMQX 保持原用户陈述证据。",
+      "scope": "用户口径；生产现状未复核",
+      "sources": [
+        "S-21",
+        "S-02"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-04",
+      "status": "confirmed",
+      "evidence_level": "local_file",
+      "statement": "Prisma PostgreSQL 与 ingest TimescaleDB",
+      "scope": "当前本地文件与用户架构确认一致；生产版本未核实",
+      "sources": [
+        "S-07",
+        "S-08",
+        "S-21"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-05",
+      "status": "confirmed",
+      "evidence_level": "local_file",
+      "statement": "Go 与 Python 并行网关文档存在",
+      "scope": "未决定 Python 退役",
+      "sources": [
+        "S-09",
+        "S-10"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-06",
+      "status": "confirmed",
+      "evidence_level": "local_file",
+      "statement": "存在协议源码文件及可选构建说明",
+      "scope": "能力需逐协议验证",
+      "sources": [
+        "S-11",
+        "S-12"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-07",
+      "status": "confirmed",
+      "evidence_level": "local_file",
+      "statement": "授权文档描述 Ed25519、硬件绑定与 v2 序号",
+      "scope": "运行固件未查",
+      "sources": [
+        "S-13"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-08",
+      "status": "confirmed",
+      "evidence_level": "local_file",
+      "statement": ".lic 内容仍为 JSON 并兼容 .json",
+      "scope": "文件格式规则",
+      "sources": [
+        "S-14"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-09",
+      "status": "confirmed",
+      "evidence_level": "local_file",
+      "statement": "功能权限与动态设备范围文档存在",
+      "scope": "未重跑安全测试",
+      "sources": [
+        "S-15"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-10",
+      "status": "confirmed",
+      "evidence_level": "local_file",
+      "statement": "租户停用与设备云连接停用独立",
+      "scope": "项目文档约定",
+      "sources": [
+        "S-16"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-11",
+      "status": "confirmed",
+      "evidence_level": "user_statement",
+      "statement": "购买网关赠送可配置额度",
+      "scope": "具体价格和额度待定",
+      "sources": [
+        "S-04"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-12",
+      "status": "confirmed",
+      "evidence_level": "local_file",
+      "statement": "订阅、订单、审核、扩容、权益模型存在",
+      "scope": "仅结构，不代表闭环完成",
+      "sources": [
+        "S-07"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-13",
+      "status": "confirmed",
+      "evidence_level": "historical_report",
+      "statement": "GoView 替换和静态编辑有历史记录",
+      "scope": "未复验保存预览业务闭环",
+      "sources": [
+        "S-17"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "C-14",
+      "status": "confirmed",
+      "evidence_level": "historical_report",
+      "statement": "EG100 产品规格在文档中被更正",
+      "scope": "批次 BOM 待核",
+      "sources": [
+        "S-19"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "Q-01",
+      "status": "confirmed",
+      "evidence_level": "user_statement",
+      "statement": "网关支持 MySQL 输出；云平台 PostgreSQL/TimescaleDB。",
+      "scope": "用途选型确认，生产版本未核实",
+      "sources": [
+        "S-21",
+        "S-07",
+        "S-08"
+      ],
+      "review_status": "user_confirmed",
+      "resolution": "closed"
+    },
+    {
+      "id": "D-01",
+      "status": "deprecated",
+      "evidence_level": "superseded_local_description",
+      "statement": "当前本地云 API=FastAPI 的描述",
+      "scope": "仅云 API；Python 网关不受影响",
+      "sources": [
+        "S-03",
+        "S-06"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "D-02",
+      "status": "deprecated",
+      "evidence_level": "superseded_local_description",
+      "statement": "当前 apps/web 声明 Vite5 的描述",
+      "scope": "仅 apps/web",
+      "sources": [
+        "S-03",
+        "S-06"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "D-03",
+      "status": "deprecated",
+      "evidence_level": "superseded_user_direction",
+      "statement": "全套餐固定半价作为已选主模式",
+      "scope": "不禁止后续另批折扣",
+      "sources": [
+        "S-04"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "D-04",
+      "status": "deprecated",
+      "evidence_level": "superseded_local_description",
+      "statement": "IEC61850 只有 TCP 连通占位的概括",
+      "scope": "标签决定包能力",
+      "sources": [
+        "S-09",
+        "S-12"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "D-05",
+      "status": "deprecated",
+      "evidence_level": "superseded_historical_report",
+      "statement": "EG100 总计两串口的旧默认规格",
+      "scope": "仅该产品库记录",
+      "sources": [
+        "S-19"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "D-06",
+      "status": "deprecated",
+      "evidence_level": "superseded_local_description",
+      "statement": "ingest 只是占位的概括",
+      "scope": "当前工作树",
+      "sources": [
+        "S-05",
+        "S-08",
+        "S-18"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "D-07",
+      "status": "deprecated",
+      "evidence_level": "superseded_historical_report",
+      "statement": "GoView 编辑态默认实时请求",
+      "scope": "预览与发布态不受影响",
+      "sources": [
+        "S-17"
+      ],
+      "review_status": "awaiting_owner_review"
+    },
+    {
+      "id": "D-08",
+      "status": "deprecated",
+      "evidence_level": "user_statement",
+      "statement": "当前云平台 MySQL/InfluxDB 的旧口径已废弃。",
+      "scope": "架构描述，不涉及迁移",
+      "sources": [
+        "S-21"
+      ],
+      "review_status": "user_confirmed"
+    }
+  ]
+}

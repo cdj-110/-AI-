@@ -1,0 +1,34 @@
+[Unit]
+Description=Weikong Go Edge Gateway (Ubuntu ARM64 test)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/weikong-gateway
+Environment=LD_LIBRARY_PATH=/opt/weikong-gateway/lib
+Environment=GOMEMLIMIT=64MiB
+Environment=GOGC=70
+ExecStartPre=/usr/bin/install -d -m 0750 /var/log/weikong-gateway
+ExecStart=/bin/sh -c 'exec /opt/weikong-gateway/bin/weikong-gateway -config /opt/weikong-gateway/config/config.local.json >>/var/log/weikong-gateway/gateway.log 2>&1'
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=mixed
+LimitNOFILE=4096
+TasksMax=64
+MemoryAccounting=yes
+TasksAccounting=yes
+MemoryHigh=64M
+MemoryMax=80M
+StandardOutput=null
+StandardError=journal
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

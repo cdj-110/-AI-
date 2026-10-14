@@ -1,0 +1,17 @@
+#!/bin/sh
+
+MARKER="/userdata/weikong/config/wireless-enabled"
+VENDOR_INIT="/userdata/weikong/lib/wireless/S40bluetoothd.vendor"
+
+case "${1:-start}" in
+	start|stop|restart|reload)
+		if [ -f "$MARKER" ]; then
+			exec "$VENDOR_INIT" "$1"
+		fi
+		[ "$1" = "start" ] && echo "bluetoothd disabled with wireless stack"
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|reload}" >&2
+		exit 3
+		;;
+esac

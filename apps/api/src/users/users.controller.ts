@@ -44,6 +44,11 @@ export class UsersController {
     return created;
   }
 
+  @Get('device-scope-options')
+  deviceScopeOptions(@CurrentUser() user: AuthUser) {
+    return this.usersService.deviceScopeOptions(user);
+  }
+
   @Get(':id')
   findOne(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.usersService.findOne(user, id);

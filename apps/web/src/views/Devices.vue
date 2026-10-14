@@ -1,13 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { Plus, Search } from '@element-plus/icons-vue';
+import { Connection, Plus, Search } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
 import { apiRequest } from '../api/request';
+import { formatMetricValue } from '../utils/metric-value';
+import GatewayBindDialog from '../components/GatewayBindDialog.vue';
+import DeviceGroupPanel, { type DeviceGroupItem } from '../components/DeviceGroupPanel.vue';
 import { useUserStore } from '../stores/user';
+import { hasPermission } from '../utils/permissions';
 
 interface TenantItem {
   id: string;
   name: string;
+  deviceCloudAccessDisabled?: boolean;
 }
 
 interface DeviceItem {
@@ -21,10 +26,13 @@ interface DeviceItem {
   protocol: string;
   deviceType: string;
   status: string;
+  cloudAccessEnabled: boolean;
+  cloudDisabledReason?: string;
   location?: string;
   latitude?: number;
   longitude?: number;
   lastSeenAt?: string;
+  groups?: Array<{ id: string; name: string }>;
 }
 
 interface GatewayOption {
@@ -42,6 +50,7 @@ interface ModelTemplateItem {
 
 const userStore = useUserStore();
 const loading = ref(false);
+const gatewayBindVisible = ref(false);
 const dialogVisible = ref(false);
 const telemetryVisible = ref(false);
 const telemetryLoading = ref(false);
@@ -55,7 +64,61 @@ const devices = ref<DeviceItem[]>([]);
 const modelTemplates = ref<ModelTemplateItem[]>([]);
 const gatewayOptions = ref<GatewayOption[]>([]);
 const total = ref(0);
-const query = reactive({ page: 1, pageSize: 10, keyword: '', deviceType: '' });
+const query = reactive({ page: 1, pageSize: 10, keyword: '', deviceType: '', groupId: '' });
+const groups = ref<DeviceGroupItem[]>([]), groupsLoading = ref(false);
+const groupTotals = reactive({ totalDevices: 0, ungroupedDevices: 0 });
+const deviceTable = ref<{ clearSelection: () => void }>();
+const selectedDevices = ref<DeviceItem[]>([]), assignVisible = ref(false), assigning = ref(false);
+const assignIds = ref<string[]>([]), targetGroupIds = ref<string[]>([]);
+const assignmentMode = ref<'ADD' | 'REMOVE' | 'REPLACE'>('ADD');
+const tenantGroupsEnabled = computed(() => ['TENANT_ADMIN', 'TENANT_USER'].includes(userStore.userInfo?.role ?? ''));
+const canManageGroups = computed(() => hasPermission(userStore.userInfo, 'DEVICE_GROUP_MANAGE'));
+let devicesRequest = 0, groupsRequest = 0;
+
+async function loadGroups(silentError = false) {
+  if (!tenantGroupsEnabled.value) return;
+  const request = ++groupsRequest;
+  groupsLoading.value = !silentError;
+  try {
+    const data = await apiRequest<{ items: DeviceGroupItem[]; totalDevices: number; ungroupedDevices: number }>({ url: '/api/device-groups', method: 'GET', silentError });
+    if (request !== groupsRequest) return;
+    groups.value = data.items;
+    Object.assign(groupTotals, { totalDevices: data.totalDevices, ungroupedDevices: data.ungroupedDevices });
+    if (query.groupId && query.groupId !== 'ungrouped' && !data.items.some(group => group.id === query.groupId)) {
+      query.groupId = '';
+      query.page = 1;
+      await loadDevices();
+    }
+  } finally { if (request === groupsRequest) groupsLoading.value = false; }
+}
+
+async function selectGroup(id: string) { query.groupId = id; await searchDevices(); }
+async function refreshGroups(deletedId?: string) {
+  if (deletedId === query.groupId) { query.groupId = 'ungrouped'; query.page = 1; }
+  await Promise.all([loadGroups(), loadDevices()]);
+}
+function openAssign(device?: DeviceItem) {
+  assignIds.value = device ? [device.id] : selectedDevices.value.map(item => item.id);
+  if (!assignIds.value.length) return;
+  assignmentMode.value = device ? 'REPLACE' : 'ADD';
+  targetGroupIds.value = device?.groups?.map(group => group.id) ?? [];
+  assignVisible.value = true;
+}
+async function assignGroup() {
+  if (assigning.value) return;
+  if (assignmentMode.value !== 'REPLACE' && !targetGroupIds.value.length) {
+    ElMessage.warning(assignmentMode.value === 'ADD' ? '请选择要加入的分组' : '请选择要移出的分组');
+    return;
+  }
+  assigning.value = true;
+  try {
+    await apiRequest({ url: '/api/device-groups/membership', method: 'PATCH', data: { deviceIds: assignIds.value, groupIds: targetGroupIds.value, mode: assignmentMode.value } });
+    assignVisible.value = false;
+    ElMessage.success(assignmentMode.value === 'ADD' ? '已加入选中分组' : assignmentMode.value === 'REMOVE' ? '已从选中分组移出' : '设备分组已更新');
+    await refreshGroups();
+  } catch { /* Keep the dialog and selected devices when the request fails. */ }
+  finally { assigning.value = false; }
+}
 const form = reactive({
   deviceKey: '',
   name: '',
@@ -67,13 +130,29 @@ const form = reactive({
   longitude: undefined as number | undefined,
   modelTemplateId: '',
 });
+const protocolOptions = [
+  { label: 'MQTT', value: 'MQTT' },
+  { label: 'HTTP', value: 'HTTP' },
+  { label: 'Modbus（通用）', value: 'MODBUS' },
+  { label: 'Modbus TCP', value: 'modbus-tcp' },
+  { label: 'Modbus RTU', value: 'modbus-rtu' },
+  { label: 'DL/T 645', value: 'dlt645' },
+  { label: 'IEC 104', value: 'iec104' },
+  { label: 'IEC 61850 MMS', value: 'iec61850' },
+  { label: 'IEC 61850 GOOSE', value: 'iec61850-goose' },
+  { label: 'Siemens S7', value: 'siemens-s7' },
+  { label: 'OPC UA', value: 'opcua' },
+  { label: 'OPC DA', value: 'opcda' },
+];
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 let coordinateMap: any;
 let coordinateMarker: any;
 let amapLoader: Promise<any> | undefined;
 
 const isSuperAdmin = computed(() => userStore.userInfo?.role === 'SUPER_ADMIN');
-const canManage = computed(() => userStore.userInfo?.role !== 'TENANT_USER');
+const canCreateDevice = computed(() => hasPermission(userStore.userInfo, 'DEVICE_CREATE'));
+const canEditDevice = computed(() => hasPermission(userStore.userInfo, 'DEVICE_EDIT'));
+const canDeleteDevice = computed(() => hasPermission(userStore.userInfo, 'DEVICE_DELETE'));
 const rules: FormRules = {
   deviceKey: [{ required: true, message: '请输入设备编号', trigger: 'blur' }],
   name: [{ required: true, message: '请输入设备名称', trigger: 'blur' }],
@@ -82,13 +161,22 @@ const rules: FormRules = {
 
 async function loadDevices(silentError = false) {
   // 列表定时刷新用于兜底；上线/离线的实时变化由 MainLayout 的 SSE 事件同步。
-  loading.value = true;
+  if (silentError && loading.value) return;
+  const request = ++devicesRequest;
+  if (!silentError) { deviceTable.value?.clearSelection(); selectedDevices.value = []; }
+  loading.value = !silentError;
   try {
     const data = await apiRequest<{ items: DeviceItem[]; total: number }>({ url: '/api/devices', method: 'GET', params: query, silentError });
+    if (request !== devicesRequest) return;
+    if (!silentError) { deviceTable.value?.clearSelection(); selectedDevices.value = []; }
     devices.value = data.items;
     total.value = data.total;
+    if (!data.items.length && query.page > 1) {
+      query.page = Math.max(1, Math.ceil(data.total / query.pageSize));
+      await loadDevices(silentError);
+    }
   } finally {
-    loading.value = false;
+    if (request === devicesRequest) loading.value = false;
   }
 }
 
@@ -152,14 +240,26 @@ async function submit() {
   await apiRequest({ url: editingId.value ? `/api/devices/${editingId.value}` : '/api/devices', method: editingId.value ? 'PATCH' : 'POST', data });
   ElMessage.success(editingId.value ? '设备已更新' : '设备已创建');
   dialogVisible.value = false;
-  await loadDevices();
+  await Promise.all([loadDevices(), loadGroups()]);
 }
 
 async function remove(device: DeviceItem) {
-  await ElMessageBox.confirm(`确定删除设备“${device.name}”吗？`, '删除确认', { type: 'warning' });
-  await apiRequest({ url: `/api/devices/${device.id}`, method: 'DELETE' });
-  ElMessage.success('设备已删除');
-  await loadDevices();
+  const gatewayTip = device.deviceType === 'GATEWAY'
+    ? ' 如果它来自出厂网关绑定，删除后会同时解除绑定，可重新测试绑定流程。'
+    : '';
+  await ElMessageBox.confirm(`确定删除设备“${device.name}”吗？${gatewayTip}`, '删除确认', {
+    type: 'warning',
+    confirmButtonText: '确认删除',
+    cancelButtonText: '取消',
+  });
+  const result = await apiRequest<{ message: string; factoryGateway?: { sn: string } }>({
+    url: `/api/devices/${device.id}`,
+    method: 'DELETE',
+  });
+  ElMessage.success(result.factoryGateway
+    ? `设备已删除，${result.factoryGateway.sn} 已解除绑定，可到出厂网关重置绑定码`
+    : '设备已删除');
+  await Promise.all([loadDevices(), loadGroups()]);
 }
 
 async function openTelemetry(device: DeviceItem) {
@@ -235,7 +335,11 @@ function setPickedCoordinate(longitude: number, latitude: number) {
 }
 
 function formatMetrics(metrics: Record<string, unknown>) {
-  return Object.entries(metrics).map(([key, value]) => `${key}: ${String(value)}`).join(' · ');
+  return Object.entries(metrics)
+    .filter(([key]) => key.trim())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}: ${formatMetricValue(value)}`)
+    .join(' · ');
 }
 
 function statusType(status: string) {
@@ -281,12 +385,13 @@ function handleDeviceStatusEvent(event: Event) {
 }
 
 onMounted(async () => {
-  await loadDevices();
+  void Promise.all([loadDevices(), loadGroups()]).catch(() => {});
   window.addEventListener('device-status-change', handleDeviceStatusEvent);
-  refreshTimer = setInterval(() => void loadDevices(true), 30000);
+  refreshTimer = setInterval(() => { void Promise.all([loadDevices(true), loadGroups(true)]).catch(() => {}); }, 30000);
 });
 
 onBeforeUnmount(() => {
+  devicesRequest++; groupsRequest++;
   window.removeEventListener('device-status-change', handleDeviceStatusEvent);
   if (refreshTimer) clearInterval(refreshTimer);
 });
@@ -299,9 +404,13 @@ onBeforeUnmount(() => {
         <h1 class="page-title">设备管理</h1>
         <p class="page-description">维护设备档案和当前连接状态</p>
       </div>
-      <el-button v-if="canManage" type="primary" :icon="Plus" @click="openCreate">新增设备</el-button>
+      <div v-if="userStore.userInfo?.role === 'TENANT_ADMIN' || canCreateDevice" class="page-action-buttons">
+        <el-button v-if="userStore.userInfo?.role === 'TENANT_ADMIN'" :icon="Connection" @click="gatewayBindVisible = true">新增网关</el-button>
+        <el-button v-if="canCreateDevice" type="primary" :icon="Plus" @click="openCreate">新增设备</el-button>
+      </div>
     </div>
-    <section class="table-panel">
+    <div class="devices-workspace">
+    <section class="table-panel devices-table-panel">
       <el-alert class="topic-tip" type="info" :closable="false" show-icon>
         <template #title>
           心跳：<code>weikong/devices/&lt;设备编号&gt;/heartbeat</code>
@@ -312,20 +421,34 @@ onBeforeUnmount(() => {
         </template>
       </el-alert>
       <div class="table-toolbar">
-        <el-input v-model="query.keyword" clearable placeholder="搜索设备名称或编号" style="max-width: 300px" @keyup.enter="searchDevices">
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
-        <el-select v-model="query.deviceType" clearable placeholder="全部类型" style="width: 140px" @change="searchDevices">
-          <el-option label="网关" value="GATEWAY" />
-          <el-option label="子设备" value="GATEWAY_CHILD" />
-          <el-option label="直连" value="DIRECT" />
-        </el-select>
-        <el-button @click="searchDevices">查询</el-button>
+        <div class="device-filter-controls">
+          <DeviceGroupPanel v-if="tenantGroupsEnabled" :items="groups" :selected="query.groupId" :total="groupTotals.totalDevices" :ungrouped="groupTotals.ungroupedDevices" :can-manage="canManageGroups" :loading="groupsLoading" @select="selectGroup" @changed="refreshGroups" />
+          <el-input v-model="query.keyword" clearable placeholder="搜索设备名称或编号" class="device-search" @keyup.enter="searchDevices">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select v-model="query.deviceType" clearable placeholder="全部类型" class="device-type-filter" @change="searchDevices">
+            <el-option label="网关" value="GATEWAY" />
+            <el-option label="子设备" value="GATEWAY_CHILD" />
+            <el-option label="直连" value="DIRECT" />
+          </el-select>
+          <el-button @click="searchDevices">查询</el-button>
+        </div>
+        <el-button v-if="canManageGroups && selectedDevices.length" type="primary" plain @click="openAssign()">调整分组（{{ selectedDevices.length }}）</el-button>
       </div>
-      <el-table v-loading="loading" :data="devices">
+      <el-table ref="deviceTable" v-loading="loading" :data="devices" row-key="id" @selection-change="selectedDevices = $event">
+        <el-table-column v-if="canManageGroups" type="selection" width="44" :reserve-selection="true" />
         <el-table-column prop="deviceKey" label="设备编号" min-width="150" />
         <el-table-column label="设备名称" min-width="150"><template #default="{ row }"><router-link :to="`/devices/${row.id}`">{{ row.name }}</router-link></template></el-table-column>
         <el-table-column v-if="isSuperAdmin" prop="tenant.name" label="所属租户" min-width="160" />
+        <el-table-column v-if="tenantGroupsEnabled" label="设备分组" min-width="210">
+          <template #default="{ row }">
+            <button v-if="canManageGroups" type="button" class="device-groups-cell" :class="{ empty: !row.groups?.length }" @click="openAssign(row)">
+              <template v-if="row.groups?.length"><el-tag v-for="group in row.groups.slice(0, 2)" :key="group.id" size="small" effect="plain">{{ group.name }}</el-tag><span v-if="row.groups.length > 2">+{{ row.groups.length - 2 }}</span></template>
+              <template v-else>未分组</template>
+            </button>
+            <div v-else class="device-groups-cell readonly"><template v-if="row.groups?.length"><el-tag v-for="group in row.groups.slice(0, 2)" :key="group.id" size="small" effect="plain">{{ group.name }}</el-tag><span v-if="row.groups.length > 2">+{{ row.groups.length - 2 }}</span></template><template v-else>未分组</template></div>
+          </template>
+        </el-table-column>
         <el-table-column label="设备类型" min-width="150">
           <template #default="{ row }">
             <el-tag class="device-type-tag" :class="deviceTypeTagClass(row.deviceType)" :type="deviceTypeTagType(row.deviceType)">{{ deviceTypeLabel(row.deviceType) }}</el-tag>
@@ -333,14 +456,38 @@ onBeforeUnmount(() => {
           </template>
         </el-table-column>
         <el-table-column prop="protocol" label="协议" width="90" />
-        <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag></template></el-table-column>
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tooltip :disabled="row.cloudAccessEnabled && !row.tenant?.deviceCloudAccessDisabled" :content="row.tenant?.deviceCloudAccessDisabled ? '所属租户已停用全部设备云连接' : row.cloudDisabledReason || '管理平台已禁用该设备的云连接'">
+              <el-tag :type="row.tenant?.deviceCloudAccessDisabled ? 'info' : statusType(row.status)">{{ row.tenant?.deviceCloudAccessDisabled ? '租户禁用' : row.cloudAccessEnabled ? statusLabel(row.status) : '平台禁用' }}</el-tag>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column label="最后上报" min-width="180"><template #default="{ row }">{{ row.lastSeenAt ? new Date(row.lastSeenAt).toLocaleString() : '-' }}</template></el-table-column>
         <el-table-column label="操作" width="210" fixed="right">
-          <template #default="{ row }"><el-button link type="primary" @click="openTelemetry(row)">查看数据</el-button><el-button v-if="canManage" link type="primary" @click="openEdit(row)">编辑</el-button><el-button v-if="canManage" link type="danger" @click="remove(row)">删除</el-button></template>
+          <template #default="{ row }"><el-button link type="primary" @click="openTelemetry(row)">查看数据</el-button><el-button v-if="canEditDevice" link type="primary" @click="openEdit(row)">编辑</el-button><el-button v-if="canDeleteDevice" link type="danger" @click="remove(row)">删除</el-button></template>
         </el-table-column>
       </el-table>
-      <div class="pagination"><el-pagination v-model:current-page="query.page" v-model:page-size="query.pageSize" layout="total, prev, pager, next" :total="total" @current-change="loadDevices" /></div>
+      <div class="pagination"><el-pagination v-model:current-page="query.page" v-model:page-size="query.pageSize" layout="total, prev, pager, next" :total="total" @current-change="loadDevices()" /></div>
     </section>
+    </div>
+    <el-dialog v-model="assignVisible" title="调整设备分组" width="min(560px, 94vw)" :close-on-click-modal="!assigning" :close-on-press-escape="!assigning" :show-close="!assigning">
+      <p class="form-tip">已选择 {{ assignIds.length }} 台设备。一台设备可同时属于多个分组，不影响网关与子设备关系。</p>
+      <el-form label-position="top" class="assign-group-form">
+        <el-form-item v-if="assignIds.length > 1" label="批量操作">
+          <el-radio-group v-model="assignmentMode" :disabled="assigning"><el-radio-button value="ADD">加入分组</el-radio-button><el-radio-button value="REMOVE">移出分组</el-radio-button></el-radio-group>
+        </el-form-item>
+        <el-alert v-if="assignIds.length > 1" :closable="false" type="info" show-icon :title="assignmentMode === 'ADD' ? '保留每台设备原有分组，只新增下方选中的分组。' : '只移除下方选中的分组，其他分组保持不变。'" />
+        <el-form-item :label="assignIds.length === 1 ? '所属分组（可多选）' : '选择分组'">
+          <el-checkbox-group v-model="targetGroupIds" class="assignment-group-list" :disabled="assigning">
+            <el-checkbox v-for="group in groups" :key="group.id" :value="group.id" border>{{ group.name }}<small>{{ group._count.devices }} 台</small></el-checkbox>
+          </el-checkbox-group>
+          <el-empty v-if="!groups.length" description="暂无可用分组" :image-size="52" />
+        </el-form-item>
+        <p v-if="assignIds.length === 1" class="assignment-hint">取消全部勾选后保存，该设备将变为“未分组”。</p>
+      </el-form>
+      <template #footer><el-button :disabled="assigning" @click="assignVisible = false">取消</el-button><el-button type="primary" :loading="assigning" @click="assignGroup">确定</el-button></template>
+    </el-dialog>
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑设备' : '新增设备'" width="520px">
       <el-form ref="formRef" :model="form" :rules="rules" label-width="86px">
         <el-form-item label="设备编号" prop="deviceKey"><el-input v-model="form.deviceKey" placeholder="例如 WK-SENSOR-001" /></el-form-item>
@@ -358,7 +505,11 @@ onBeforeUnmount(() => {
           </el-select>
           <p class="form-tip">只有类型为“网关”的设备会出现在这里。</p>
         </el-form-item>
-        <el-form-item label="接入协议"><el-select v-model="form.protocol" class="full-width"><el-option label="MQTT" value="MQTT" /><el-option label="HTTP" value="HTTP" /><el-option label="Modbus" value="MODBUS" /></el-select></el-form-item>
+        <el-form-item label="接入协议">
+          <el-select v-model="form.protocol" filterable class="full-width">
+            <el-option v-for="option in protocolOptions" :key="option.value" :label="option.label" :value="option.value" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="安装位置"><el-input v-model="form.location" /></el-form-item>
         <el-form-item label="地图坐标">
           <div class="coordinate-row">
@@ -392,10 +543,14 @@ onBeforeUnmount(() => {
       </el-table>
       <template #footer><el-button @click="telemetryVisible = false">关闭</el-button></template>
     </el-dialog>
+    <GatewayBindDialog v-model:visible="gatewayBindVisible" @bound="refreshGroups()" />
   </div>
 </template>
 
 <style scoped>
+.devices-workspace,.devices-table-panel{min-width:0}.device-filter-controls{display:flex;align-items:center;gap:12px;min-width:0}.device-search{width:300px}.device-type-filter{width:140px}.assign-group-form{margin-top:18px}.device-groups-cell{display:flex;max-width:100%;align-items:center;gap:5px;padding:2px 0;border:0;background:transparent;color:#1677ff;cursor:pointer}.device-groups-cell.empty{color:#8a98ad}.device-groups-cell.readonly{cursor:default}.device-groups-cell>span{flex:0 0 auto;color:#6b7f9b;font-size:12px}.assignment-group-list{display:grid;width:100%;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.assignment-group-list .el-checkbox{width:100%;height:38px;margin:0}.assignment-group-list :deep(.el-checkbox__label){display:flex;min-width:0;flex:1;align-items:center;justify-content:space-between;gap:8px}.assignment-group-list small{color:#94a3b8;font-size:11px}.assignment-hint{margin:-8px 0 0;color:#8492a6;font-size:12px}
+.page-action-buttons { display: flex; align-items: center; gap: 10px; }
+.page-action-buttons .el-button { margin-left: 0; }
 .topic-tip { margin-bottom: 16px; }
 .topic-divider { margin: 0 8px; color: #9aa4b2; }
 code { color: #2563eb; font-family: Consolas, monospace; }
@@ -409,5 +564,16 @@ code { color: #2563eb; font-family: Consolas, monospace; }
 .coordinate-map { height: 460px; margin-top: 12px; overflow: hidden; border: 1px solid #e9eef5; border-radius: 12px; }
 .coordinate-preview { float: left; color: #64748b; font-size: 13px; line-height: 32px; }
 .form-tip { margin: 6px 0 0; color: #94a3b8; font-size: 12px; line-height: 1.5; }
-@media (max-width: 560px) { .coordinate-row { grid-template-columns: 1fr; } }
+@media (max-width: 560px) {
+  .page-actions { flex-wrap: wrap; gap: 12px; }
+  .devices-table-panel .table-toolbar { flex-wrap: wrap; justify-content: flex-start; }
+  .device-filter-controls { width: 100%; flex-wrap: wrap; }
+  .device-search { flex-basis: 100%; width: 100%; }
+  .device-type-filter { flex: 1; min-width: 140px; }
+  .devices-table-panel :deep(.el-table__cell.el-table-fixed-column--right) { position: static!important; right: auto!important; }
+  .devices-table-panel :deep(.el-table__cell.el-table-fixed-column--right::before) { display: none; }
+  .page-action-buttons { width: 100%; }
+  .page-action-buttons .el-button { flex: 1; }
+  .coordinate-row { grid-template-columns: 1fr; }
+}
 </style>

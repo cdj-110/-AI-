@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from 'vue';
 import { RefreshRight, Search } from '@element-plus/icons-vue';
 import { apiRequest } from '../api/request';
+import { userDisplayName } from '../utils/user-display-name';
 
 interface LoginLogItem {
   id: string;
@@ -57,14 +58,14 @@ onMounted(loadLogs);
     <div class="page-actions">
       <div>
         <h1 class="page-title">登录日志</h1>
-        <p class="page-description">记录平台账号登录来源，包含 IP、账号、结果和浏览器信息</p>
+        <p class="page-description">记录平台登录来源，包含 IP、邮箱或手机号、结果和浏览器信息</p>
       </div>
       <el-button :icon="RefreshRight" @click="loadLogs">刷新</el-button>
     </div>
 
     <section class="table-panel">
       <div class="table-toolbar">
-        <el-input v-model="query.keyword" clearable placeholder="搜索账号、昵称或 IP" style="max-width: 300px" @keyup.enter="searchLogs">
+        <el-input v-model="query.keyword" clearable placeholder="搜索登录凭证、用户名称或 IP" style="max-width: 300px" @keyup.enter="searchLogs">
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
         <el-select v-model="query.success" clearable placeholder="全部结果" style="width: 130px" @change="searchLogs">
@@ -78,10 +79,10 @@ onMounted(loadLogs);
         <el-table-column label="登录时间" width="180">
           <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
         </el-table-column>
-        <el-table-column prop="username" label="登录账号" min-width="130" />
-        <el-table-column label="用户" min-width="150">
+        <el-table-column prop="username" label="登录凭证" min-width="160" />
+        <el-table-column label="用户名称" min-width="150">
           <template #default="{ row }">
-            <span>{{ row.user?.nickname || row.user?.username || '-' }}</span>
+            <span>{{ userDisplayName(row.user) }}</span>
             <small v-if="row.user" class="muted"> {{ roleLabel(row.user.role) }}</small>
           </template>
         </el-table-column>

@@ -16,7 +16,7 @@ export interface HealthItem {
 @Injectable()
 export class SystemStatusService implements OnModuleDestroy {
   private readonly timescale = new Pool({
-    connectionString: process.env.TIMESCALE_DATABASE_URL ?? 'postgresql://weikong:weikong123@127.0.0.1:5433/weikong_ts',
+    connectionString: process.env.TIMESCALE_DATABASE_URL ?? 'postgresql://weikong@127.0.0.1:5433/weikong_ts',
   });
 
   constructor(private readonly prisma: PrismaService) {}
@@ -109,20 +109,20 @@ export class SystemStatusService implements OnModuleDestroy {
   private async recentTelemetry(actor: AuthUser) {
     const devices = await this.prisma.device.findMany({
       where: actor.role === 'SUPER_ADMIN' ? {} : { tenantId: actor.tenantId ?? undefined },
-      select: { deviceKey: true, name: true },
+      select: { id: true, deviceKey: true, name: true },
     });
     if (!devices.length) return null;
-    const keys = devices.map((device) => device.deviceKey);
-    const result = await this.timescale.query<{ time: Date; device_key: string }>(
-      'SELECT time, device_key FROM telemetry_events WHERE device_key = ANY($1) ORDER BY time DESC LIMIT 1',
-      [keys],
+    const ids = devices.map((device) => device.id);
+    const result = await this.timescale.query<{ time: Date; device_id: string; device_key: string }>(
+      'SELECT time, device_id, device_key FROM telemetry_events WHERE device_id = ANY($1) ORDER BY time DESC LIMIT 1',
+      [ids],
     );
     const latest = result.rows[0];
     if (!latest) return null;
     return {
       time: latest.time,
       deviceKey: latest.device_key,
-      deviceName: devices.find((device) => device.deviceKey === latest.device_key)?.name,
+      deviceName: devices.find((device) => device.id === latest.device_id)?.name,
     };
   }
 

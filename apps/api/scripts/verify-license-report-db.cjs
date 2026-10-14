@@ -1,0 +1,61 @@
+require('reflect-metadata');
+const assert = require('node:assert/strict');
+const { generateKeyPairSync, createHash } = require('node:crypto');
+const { PrismaClient } = require('@prisma/client');
+const { FactoryGatewaysService } = require('../dist/factory-gateways/factory-gateways.service');
+const { authorizationStatus } = require('../dist/factory-gateways/license-status');
+const { parseLicenseReport, persistLicenseReport } = require('../../ingest/dist/license-report');
+
+// Deliberately refuses production/default connection strings.
+const url = process.env.LICENSE_REPORT_TEST_DATABASE_URL;
+if (!url || new URL(url).hostname !== '127.0.0.1' || new URL(url).port !== '5548' || new URL(url).pathname !== '/license_report_test') {
+  throw new Error('An explicit isolated license_report_test database on localhost:5548 is required');
+}
+const db = new PrismaClient({ datasources: { db: { url } } });
+(async () => {
+  const { privateKey } = generateKeyPairSync('ed25519');
+  const values = { ACTIVATION_SIGNING_KEY_ID: 'report-test-key', ACTIVATION_SIGNING_PRIVATE_KEY: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'), FACTORY_CREDENTIAL_ENCRYPTION_KEY: 'isolated-report-test-key' };
+  const service = new FactoryGatewaysService(db, { get: (key, fallback) => values[key] ?? fallback });
+  const registered = await service.register({ model: 'EG100', hardwareId: 'A'.repeat(32), chipUsid: 'B'.repeat(16), batchNo: 'REPORT-TEST' });
+  const read = () => db.factoryGateway.findUniqueOrThrow({ where: { id: registered.id } });
+  const makeReport = file => ({ sn: file.sn, hardwareId: file.hardwareId, chipUsid: file.chipUsid, licenseVersion: file.licenseVersion, licenseSequence: file.licenseSequence, keyId: file.keyId, licenseId: createHash('sha256').update(file.signature).digest('hex'), issuedAt: file.issuedAt, expiresAt: file.expiresAt, features: file.features, valid: true, restricted: false });
+  const parse = (row, report) => parseLicenseReport(Buffer.from(JSON.stringify({ authorization: report })), row);
+  const save = (row, report, time) => db.$transaction(tx => persistLicenseReport(tx, row, report, time));
+  let row = await read();
+  assert.equal(authorizationStatus(row).authorizationState, 'WAITING_CONFIRMATION');
+  const report = parse(row, makeReport(registered.activationFile));
+  assert.ok(report);
+  const first = new Date();
+  assert.equal(await save(row, report, first), true);
+  row = await read();
+  assert.equal(authorizationStatus(row, first).authorizationState, 'ACTIVE');
+  assert.equal(row.licenseActivatedAt.getTime(), first.getTime());
+  assert.equal(await save(row, report, new Date(first.getTime() - 1)), false);
+  const next = new Date(first.getTime() + 15000);
+  await save(row, report, next);
+  row = await read();
+  assert.equal(row.licenseActivatedAt.getTime(), first.getTime());
+  assert.equal(row.licenseReportedAt.getTime(), next.getTime());
+  const reissued = await service.resetActivation(row.id);
+  let current = await read();
+  assert.equal(authorizationStatus(current).authorizationState, 'UPDATE_PENDING');
+  assert.equal(await save(row, report, new Date(next.getTime() + 1)), false, 'stale issuance snapshot must not overwrite a reissue');
+  assert.equal(parse(current, { ...makeReport(reissued.activationFile), licenseId: 'f'.repeat(64) }), undefined);
+  const updated = parse(current, makeReport(reissued.activationFile));
+  const confirmed = new Date(next.getTime() + 15000);
+  await assert.rejects(() => db.$transaction(async tx => { await persistLicenseReport(tx, current, updated, confirmed); throw new Error('rollback test'); }));
+  assert.equal((await read()).reportedLicense.licenseSequence, registered.licenseSequence);
+  assert.equal(await save(current, updated, confirmed), true);
+  current = await read();
+  assert.equal(authorizationStatus(current, confirmed).authorizationState, 'ACTIVE');
+  assert.equal(current.licenseActivatedAt.getTime(), first.getTime());
+  assert.equal(await save(current, parse(current, makeReport(registered.activationFile)), new Date(confirmed.getTime() + 1)), false, 'late old-license delivery must not regress a confirmed update');
+  await db.factoryGateway.update({ where: { id: current.id }, data: { status: 'DISABLED' } });
+  assert.equal(await save(current, updated, new Date(confirmed.getTime() + 1)), false);
+  await db.factoryGateway.update({ where: { id: current.id }, data: { status: 'REMOVED' } });
+  const again = await service.register({ model: 'EG100', hardwareId: current.hardwareId, chipUsid: current.chipUsid, batchNo: 'REPORT-TEST-AGAIN' });
+  assert.equal(again.reportedLicense, null);
+  assert.equal(again.licenseActivatedAt, null);
+  assert.equal(again.authorizationState, 'WAITING_CONFIRMATION');
+  console.log('Isolated database passed: registration, receipt persistence, stale/reissued/disabled guards, first confirmation, rollback/retry and re-registration.');
+})().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => db.$disconnect());

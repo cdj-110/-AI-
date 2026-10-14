@@ -1,0 +1,143 @@
+package web
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"weikong-iot-platform/apps/gateway-go/internal/config"
+	"weikong-iot-platform/apps/gateway-go/internal/hardware"
+	"weikong-iot-platform/apps/gateway-go/internal/state"
+)
+
+func TestSaveActivationDoesNotWaitForConfigApply(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	activationPath := filepath.Join(tempDir, "activation.json")
+	if err := os.WriteFile(configPath, []byte(`{"gatewayKey":"test","mqtt":{"enabled":false}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	hardwareID := hardware.ReadIdentity().ID
+	if hardwareID == "" {
+		hardwareID = "TEST-HARDWARE"
+	}
+	activation := fmt.Sprintf(`{"enabled":true,"hardwareId":%q,"sn":"TEST-SN","deviceSecret":"secret","broker":"tcp://127.0.0.1:1883"}`, hardwareID)
+	body, err := json.Marshal(map[string]string{"file": activationPath, "content": activation})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	applyBlocked := make(chan struct{})
+	server := &Server{
+		configPath: configPath,
+		onConfig: func(config.Config) error {
+			<-applyBlocked
+			return nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/activation", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.saveActivation(response, request)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		close(applyBlocked)
+		t.Fatal("activation save waited for config apply")
+	}
+	close(applyBlocked)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestSaveDisabledActivationResetsStatusImmediately(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	activationPath := filepath.Join(tempDir, "activation.json")
+	if err := os.WriteFile(activationPath, []byte(`{"enabled":true,"hardwareId":"TEST-HARDWARE","sn":"TEST-SN","deviceSecret":"secret","broker":"tcp://127.0.0.1:1883"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf(`{"gatewayKey":"test","activation":{"enabled":true,"file":%q},"mqtt":{"enabled":false}}`, activationPath)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := state.New(cfg)
+	store.SetMQTTChannelConnected("activation", true)
+
+	body, err := json.Marshal(map[string]string{
+		"file":    activationPath,
+		"content": `{"enabled":false}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{configPath: configPath, store: store, onConfig: func(config.Config) error { return nil }}
+	request := httptest.NewRequest(http.MethodPut, "/api/activation", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+
+	server.saveActivation(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	channel := store.Snapshot().MQTTChannels["activation"]
+	if channel.Enabled || channel.Connected {
+		t.Fatalf("activation status = enabled %v connected %v, want disabled and disconnected", channel.Enabled, channel.Connected)
+	}
+}
+
+func TestSaveActivationResolvesRelativeFileBesideConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"gatewayKey":"test","mqtt":{"enabled":false}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hardwareID := hardware.ReadIdentity().ID
+	if hardwareID == "" {
+		hardwareID = "TEST-HARDWARE"
+	}
+	content := fmt.Sprintf(`{"enabled":true,"hardwareId":%q,"sn":"TEST-SN","deviceSecret":"secret","broker":"tcp://127.0.0.1:1883"}`, hardwareID)
+	body, err := json.Marshal(map[string]string{"file": "activation.local.json", "content": content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{configPath: configPath, onConfig: func(config.Config) error { return nil }}
+	request := httptest.NewRequest(http.MethodPut, "/api/activation", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+
+	server.saveActivation(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	want := filepath.Join(tempDir, "activation.local.json")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("activation file not saved beside config: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved config.Config
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Activation.File != want {
+		t.Fatalf("activation file = %q, want %q", saved.Activation.File, want)
+	}
+}

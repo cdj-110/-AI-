@@ -1,0 +1,3 @@
+ALTER TABLE "OtaPackage"
+  ADD COLUMN "fileAvailable" BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN "purgedAt" TIMESTAMP(3);

@@ -12,32 +12,59 @@ import { ReportDeviceStatusDto } from './dto/report-device-status.dto';
 import { UpdateDeviceAlarmRuleDto } from './dto/update-device-alarm-rule.dto';
 import { UpdateDeviceMetricDto } from './dto/update-device-metric.dto';
 import { UpdateDeviceDto } from './dto/update-device.dto';
+import { UpdateDeviceCloudAccessDto } from './dto/update-device-cloud-access.dto';
 import { DevicesService } from './devices.service';
+import { Permissions } from '../common/decorators/permissions.decorator';
+import { PermissionsGuard } from '../common/guards/permissions.guard';
+import { HistoryQueryDto } from './dto/history-query.dto';
 
 @Controller('devices')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+@Permissions('DEVICE_VIEW')
 export class DevicesController {
   constructor(
     private readonly devicesService: DevicesService,
     private readonly operationLogsService: OperationLogsService,
   ) {}
 
+  @Get('data/retention')
+  @Roles('TENANT_ADMIN', 'TENANT_USER')
+  historyRetention(@CurrentUser() user: AuthUser) { return this.devicesService.historyWindow(user); }
+
+  @Post('data/history')
+  @Roles('TENANT_ADMIN', 'TENANT_USER')
+  historyData(@CurrentUser() user: AuthUser, @Body() dto: HistoryQueryDto) {
+    return this.devicesService.telemetryHistoryTable(user, dto.pairs, dto.start, dto.end, dto.page ?? 1, dto.pageSize ?? 20, dto.keyword);
+  }
+
+  @Post('data/export')
+  @Roles('TENANT_ADMIN', 'TENANT_USER')
+  exportData(@CurrentUser() user: AuthUser, @Body() dto: HistoryQueryDto) {
+    return this.devicesService.exportHistory(user, dto.pairs, dto.start, dto.end, dto.keyword);
+  }
+
   // 设备列表用于后台管理页，状态会由前端全局状态流做实时修正。
   @Get()
   @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('DEVICE_VIEW', 'MAP_VIEW')
   findAll(
     @CurrentUser() user: AuthUser,
     @Query('page') page = '1',
     @Query('pageSize') pageSize = '10',
     @Query('keyword') keyword = '',
     @Query('deviceType') deviceType = '',
+    @Query('tenantId') tenantId = '',
+    @Query('status') status = '',
+    @Query('protocol') protocol = '',
+    @Query('groupId') groupId = '',
   ) {
-    return this.devicesService.findAll(user, Number(page), Number(pageSize), keyword, deviceType);
+    return this.devicesService.findAll(user, Number(page), Number(pageSize), keyword, deviceType, tenantId, status, protocol, groupId);
   }
 
   // 创建设备时可以选择物模型模板，后端会复制模板字段到设备自己的物模型中。
   @Post()
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('DEVICE_CREATE')
   async create(@CurrentUser() user: AuthUser, @Body() dto: CreateDeviceDto, @Req() request: Request) {
     const device = await this.devicesService.create(user, dto);
     await this.operationLogsService.record(user, {
@@ -55,7 +82,8 @@ export class DevicesController {
 
   // 旧版“从已有设备导入物模型”的候选设备列表，保留用于兼容现有配置入口。
   @Get('model-templates')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('MODEL_CREATE')
   modelTemplates(@CurrentUser() user: AuthUser) {
     return this.devicesService.modelTemplates(user);
   }
@@ -70,6 +98,7 @@ export class DevicesController {
   // 设备在线/离线状态的统一 SSE 事件流，前端列表、详情、通知都消费这个通道。
   @Sse('status/stream')
   @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('DEVICE_VIEW', 'MAP_VIEW')
   statusStream(@CurrentUser() user: AuthUser) {
     return this.devicesService.statusStream(user);
   }
@@ -107,6 +136,32 @@ export class DevicesController {
   @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
   reportStatus(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: ReportDeviceStatusDto) {
     return this.devicesService.reportStatus(user, id, dto);
+  }
+
+  @Patch(':id/cloud-access')
+  @Roles('SUPER_ADMIN')
+  async updateCloudAccess(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateDeviceCloudAccessDto,
+    @Req() request: Request,
+  ) {
+    const result = await this.devicesService.updateCloudAccess(user, id, dto);
+    await this.operationLogsService.record(user, {
+      module: '设备管理',
+      action: dto.enabled ? '恢复设备云连接' : '禁用设备云连接',
+      targetType: 'Device',
+      targetId: id,
+      targetName: result.device.name,
+      ip: this.clientIp(request),
+      userAgent: request.headers['user-agent'],
+      detail: {
+        reason: dto.reason,
+        disconnectResults: result.disconnectResults,
+        sharedGatewayConnectionRetained: result.sharedGatewayConnectionRetained,
+      },
+    });
+    return result;
   }
 
   // 历史遥测原始数据，仅取最近 20 条用于“最近上报”列表和初始页面数据。
@@ -231,7 +286,8 @@ export class DevicesController {
   }
 
   @Patch(':id')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('DEVICE_EDIT')
   async update(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: UpdateDeviceDto, @Req() request: Request) {
     const device = await this.devicesService.update(user, id, dto);
     await this.operationLogsService.record(user, {
@@ -248,7 +304,8 @@ export class DevicesController {
   }
 
   @Delete(':id')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('DEVICE_DELETE')
   async remove(@CurrentUser() user: AuthUser, @Param('id') id: string, @Req() request: Request) {
     const result = await this.devicesService.remove(user, id);
     await this.operationLogsService.record(user, {
@@ -258,6 +315,7 @@ export class DevicesController {
       targetId: id,
       ip: this.clientIp(request),
       userAgent: request.headers['user-agent'],
+      detail: result.factoryGateway ? { factoryGateway: result.factoryGateway, bindingReleased: true } : undefined,
     });
     return result;
   }

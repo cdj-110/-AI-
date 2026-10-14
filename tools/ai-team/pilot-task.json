@@ -1,0 +1,6 @@
+{
+  "title": "补充研发任务验收说明",
+  "profile": "docs",
+  "request": "创建 docs/ai-tasks/acceptance.md，说明微控物联云平台的开发任务如何验收：明确 Go 网关支持 MySQL 输出，云平台业务 PostgreSQL/时序 TimescaleDB；类型检查、测试和构建失败必须阻止交付；代码提交与 CI 结果必须绑定；最终人工审核；不得声称未执行的测试已通过。请使用简洁中文。",
+  "context_files": []
+}

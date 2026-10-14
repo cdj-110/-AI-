@@ -1,0 +1,37 @@
+package web
+
+import (
+ "bytes"
+ "encoding/json"
+ "net/http"
+ "net/http/httptest"
+ "path/filepath"
+ "testing"
+ "time"
+ "weikong-iot-platform/apps/gateway-go/internal/config"
+)
+
+// Isolated diagnostic only: never sends a request to a running gateway.
+func TestAuditConfigManageCannotChangeSecurity(t *testing.T) {
+ cfg, err := config.Parse([]byte(`{"gatewayKey":"audit-isolated"}`))
+ if err != nil { t.Fatal(err) }
+ cfg.Security.Roles = []config.RoleConfig{{RoleKey:"limited", Name:"Limited", Permissions:[]string{"config.manage"}}}
+ cfg.Security.Users = []config.UserConfig{{Username:"audit", RoleKey:"limited", Enabled:true}}
+ path := filepath.Join(t.TempDir(), "config.json")
+ if err = config.Save(path, cfg); err != nil { t.Fatal(err) }
+ s := &Server{configPath:path, auth:newAuthManager(), onConfig:func(config.Config)error{return nil}}
+ s.auth.sessions["audit-session"] = sessionInfo{Username:"audit", RoleKey:"limited", Permissions:[]string{"config.manage"}, ExpiresAt:time.Now().Add(time.Hour)}
+ cfg.Security.Roles[0].Permissions = []string{"*"}
+ raw, err := json.Marshal(cfg)
+ if err != nil {t.Fatal(err)}
+ request := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(raw))
+ request.Header.Set("Content-Type", "application/vnd.weikong.config+json")
+ request.AddCookie(&http.Cookie{Name:sessionCookieName,Value:"audit-session"})
+ response := httptest.NewRecorder()
+ s.configFile(response,request)
+ persisted, err := config.Load(path)
+ if err != nil {t.Fatal(err)}
+ if len(persisted.Security.Roles[0].Permissions) > 0 && persisted.Security.Roles[0].Permissions[0] == "*" {
+  t.Fatalf("expected permission rejection; got HTTP %d; persisted role permissions=%v; response=%s",response.Code,persisted.Security.Roles[0].Permissions,response.Body.String())
+ }
+}

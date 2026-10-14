@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 2,
+  "gatewayKey": "EG100-OPCDA-PERIODIC-TEST",
+  "collectIntervalMilliseconds": 1000,
+  "cacheFile": "/userdata/weikong/opcda-test/data/gateway-spool.jsonl",
+  "offlineCache": {
+    "enabled": false,
+    "maxSizeMB": 16,
+    "storagePath": "/userdata/weikong/opcda-test/data"
+  },
+  "historyStorage": {
+    "enabled": false,
+    "maxSizeMB": 16,
+    "storagePath": "/userdata/weikong/opcda-test/data"
+  },
+  "activation": {
+    "enabled": false
+  },
+  "mqtt": {
+    "enabled": false,
+    "broker": "",
+    "clientId": "",
+    "username": "",
+    "password": ""
+  },
+  "devices": [
+    {
+      "deviceKey": "opcda-matrikon-test",
+      "name": "Matrikon OPC Simulation",
+      "enabled": true,
+      "protocol": "opcda",
+      "address": "192.168.1.141",
+      "clsid": "F8582CF2-88FB-11D0-B850-00C0F0104305",
+      "domain": "DESKTOP-6U9RAVF",
+      "workstation": "EG100",
+      "securityMode": "packet_integrity",
+      "authentication": "ntlm",
+      "connectTimeoutMilliseconds": 10000,
+      "requestTimeoutMilliseconds": 10000,
+      "readMode": "sync",
+      "readSource": "device",
+      "batchSize": 100,
+      "autoReconnect": true,
+      "groupName": "WK_OPCDA_EG100_TEST",
+      "requestedUpdateRateMilliseconds": 1000,
+      "localeId": 1033,
+      "username": "opcuser",
+      "password": "CHANGE_ME_LOCAL_ONLY",
+      "reconnectIntervalSeconds": 5,
+      "points": [
+        {
+          "name": "Random Real8",
+          "metric": "random_real8",
+          "itemId": "Random.Real8",
+          "access": "read",
+          "requestedDataType": "auto",
+          "active": true,
+          "enabled": true,
+          "dataType": "auto",
+          "scale": 1
+        }
+      ]
+    }
+  ],
+  "forwardDevices": [],
+  "edgeComputing": {
+    "groups": []
+  },
+  "forwardSlave": {
+    "enabled": false
+  },
+  "web": {
+    "enabled": true,
+    "listen": "0.0.0.0:18088"
+  },
+  "watchdog": {
+    "enabled": false,
+    "hardwareEnabled": false
+  }
+}

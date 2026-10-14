@@ -1,0 +1,24 @@
+.point-sheet-table td.point-live-value.is-live-update {
+  animation: point-live-data-arrival .72s ease-out 1 !important;
+  will-change: background-color, filter;
+}
+
+.point-sheet-table td.point-live-value.bad-text.is-live-update {
+  animation-name: point-live-error-data-arrival !important;
+}
+
+@keyframes point-live-data-arrival {
+  0% { background-color: rgba(239, 246, 255, .18); filter: brightness(1); }
+  35% { background-color: rgba(191, 219, 254, .88); filter: brightness(.92); }
+  100% { background-color: rgba(239, 246, 255, .18); filter: brightness(1); }
+}
+
+@keyframes point-live-error-data-arrival {
+  0% { background-color: rgba(255, 247, 247, .24); filter: brightness(1); }
+  35% { background-color: rgba(254, 202, 202, .9); filter: brightness(.92); }
+  100% { background-color: rgba(255, 247, 247, .24); filter: brightness(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .point-sheet-table td.point-live-value.is-live-update { animation: none !important; }
+}

@@ -1,0 +1,17 @@
+import { createApp } from 'vue';
+import { createPinia } from 'pinia';
+import App from './App.vue';
+import './styles.css';
+import './tree.css';
+import './modules.css';
+import './legacy-interactions.css';
+import './protocol-tools.css';
+import './button-system.css';
+import './ai-assistant.css';
+import './confirm.css';
+import './mobile-responsive.css';
+import './live-value-pulse.css';
+import './point-value-detail.css';
+import './point-value-chart.css';
+import './point-table-overflow.css';
+createApp(App).use(createPinia()).mount('#app');

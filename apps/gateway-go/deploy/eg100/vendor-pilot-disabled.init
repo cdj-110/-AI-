@@ -1,0 +1,6 @@
+#!/bin/sh
+# Disabled with user approval: vendor 4G power cycling coincided with USB hub
+# resets and loss of the history volume. The original script is retained at
+# /userdata/weikong/backups/usb-guard-20260910/S99vanxoak_pilot.original.
+echo 'Vendor pilot disabled: network management is owned by Weikong gateway.'
+exit 0
