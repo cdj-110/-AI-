@@ -8,51 +8,637 @@ datasource db {
 }
 
 model Tenant {
+  id                        String                @id @default(uuid())
+  name                      String
+  status                    String                @default("ACTIVE")
+  deviceCloudAccessDisabled Boolean               @default(false)
+  users                     User[]
+  devices                   Device[]
+  deviceGroups              DeviceGroup[]
+  alarms                    Alarm[]
+  gatewayEvents             GatewayEvent[]
+  loginLogs                 LoginLog[]
+  operationLogs             OperationLog[]
+  deviceLogs                DeviceLog[]
+  modelTemplates            DeviceModelTemplate[]
+  scadaProjects             ScadaProject[]
+  subscriptionPlanId        String?
+  subscriptionPlan          SubscriptionPlan?      @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
+  subscriptionStartedAt     DateTime?
+  subscription              TenantSubscription?
+  subscriptionOrders        SubscriptionOrder[]
+  subscriptionNotifications SubscriptionNotification[]
+  entitlementChanges        EntitlementChange[]
+  historyDataTasks          HistoryDataTask[]
+  deviceLinkageRules        DeviceLinkageRule[]
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
+
+  @@index([subscriptionPlanId])
+}
+
+model DeviceLinkageRule {
+  id             String @id @default(uuid())
+  tenantId       String
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name           String @db.VarChar(80)
+  sourceDeviceId String
+  sourceName     String
+  sourceMetric   String
+  operator       String
+  threshold      Float
+  targetDeviceId String
+  targetName     String
+  targetMetric   String
+  actionValue    Json
+  enabled        Boolean @default(false)
+  enabledAt      DateTime?
+  authorizedBy   String
+  revision       Int @default(1)
+  met            Boolean @default(false)
+  lastSampleAt   DateTime?
+  lastError      String?
+  deletedAt      DateTime?
+  runs           DeviceLinkageRun[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  @@index([tenantId, deletedAt, createdAt])
+  @@index([sourceDeviceId, enabled])
+}
+
+model DeviceLinkageRun {
+  id               String @id @default(uuid())
+  ruleId           String
+  rule             DeviceLinkageRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  requestId        String @unique
+  targetDeviceId   String
+  targetMetric     String
+  observedValue   Float
+  actionValue     Json
+  sampleAt        DateTime
+  status          String @default("DISPATCHING")
+  message         String?
+  createdAt       DateTime @default(now())
+  @@index([ruleId, createdAt])
+  @@index([targetDeviceId, targetMetric, status])
+}
+
+model HistoryDataTask {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String   @db.VarChar(80)
+  createdById   String
+  createdByName String   @db.VarChar(100)
+  pairs         Json
+  deviceNames   String[]
+  startAt       DateTime
+  endAt         DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, createdById])
+}
+
+model SubscriptionPlan {
+  id                     String               @id @default(uuid())
+  code                   String               @unique @db.VarChar(40)
+  name                   String               @db.VarChar(60)
+  description            String?              @db.VarChar(300)
+  deviceLimit            Int                  @default(0)
+  pointLimit             Int                  @default(0)
+  scadaProjectLimit      Int                  @default(0)
+  userLimit              Int                  @default(0)
+  monthlyPriceCents      Int                  @default(0)
+  priceCents             Int                  @default(0)
+  billingCycles         String[]             @default(["YEARLY"])
+  quoteOnly              Boolean              @default(false)
+  currency               String               @default("CNY") @db.VarChar(8)
+  enabled                Boolean              @default(true)
+  sortOrder              Int                  @default(0)
+  gracePeriodDays        Int                  @default(7)
+  historyRetentionDays   Int                  @default(7)
+  historyRetentionMonths Int                  @default(0)
+  historyGraceCutoffAt    DateTime?
+  historyGraceEndsAt      DateTime?
+  tenants                Tenant[]
+  subscriptions          TenantSubscription[]
+  orders                 SubscriptionOrder[]
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  @@index([enabled, sortOrder])
+}
+
+model TenantSubscription {
+  id                    String              @id @default(uuid())
+  tenantId              String              @unique
+  tenant                Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  planId                String
+  plan                  SubscriptionPlan    @relation(fields: [planId], references: [id], onDelete: Restrict)
+  status                String              @default("ACTIVE")
+  billingCycle          String              @default("YEARLY")
+  startedAt             DateTime
+  expiresAt             DateTime
+  graceEndsAt           DateTime
+  baseDeviceLimit       Int
+  basePointLimit        Int
+  baseScadaProjectLimit Int
+  baseUserLimit         Int
+  addonDeviceLimit      Int                 @default(0)
+  addonPointLimit       Int                 @default(0)
+  addonScadaProjectLimit Int                @default(0)
+  addonUserLimit        Int                 @default(0)
+  autoRenew             Boolean             @default(false)
+  addonHistoryMonths    Int                 @default(0)
+  historyAddonExpiresAt DateTime?
+  historyGraceCutoffAt  DateTime?
+  historyGraceEndsAt    DateTime?
+  orders                SubscriptionOrder[]
+  entitlementChanges    EntitlementChange[]
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([status, expiresAt])
+  @@index([graceEndsAt])
+}
+
+model SubscriptionOrder {
+  id                String              @id @default(uuid())
+  orderNo           String              @unique @db.VarChar(32)
+  tenantId          String
+  tenant            Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subscriptionId    String?
+  subscription      TenantSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  orderType         String
+  targetPlanId      String?
+  targetPlan        SubscriptionPlan?   @relation(fields: [targetPlanId], references: [id], onDelete: Restrict)
+  addonId           String?
+  addon             QuotaAddon?         @relation(fields: [addonId], references: [id], onDelete: Restrict)
+  addonQuantity     Int                 @default(1)
+  historyAddonMonths Int                @default(0)
+  billingCycle      String              @default("YEARLY")
+  durationMonths    Int                 @default(12)
+  amountCents       Int
+  paymentAmountCents Int?
+  currency          String              @default("CNY") @db.VarChar(8)
+  status            String              @default("PENDING_REVIEW")
+  paymentMethod     String              @default("MANUAL") @db.VarChar(16)
+  paymentStatus     String              @default("UNPAID") @db.VarChar(32)
+  providerTradeNo   String?             @unique @db.VarChar(64)
+  paidAt            DateTime?
+  paymentFailureReason String?          @db.VarChar(500)
+  requestedById     String
+  requestedByName   String
+  requestedAt       DateTime            @default(now())
+  activatedAt       DateTime?
+  paymentProofs     PaymentProof[]
+  financeReviews    FinanceReview[]
+  entitlementChanges EntitlementChange[]
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  @@index([tenantId, requestedAt])
+  @@index([status, requestedAt])
+  @@index([paymentStatus, requestedAt])
+  @@index([targetPlanId])
+}
+
+model PaymentProof {
+  id                   String            @id @default(uuid())
+  orderId              String
+  order                SubscriptionOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  voucherFileName      String
+  voucherOriginalName  String
+  voucherMimeType      String
+  paymentReference     String?           @db.VarChar(100)
+  paidBy               String?           @db.VarChar(100)
+  paidAt               DateTime?
+  createdAt            DateTime          @default(now())
+
+  @@index([orderId])
+}
+
+model FinanceReview {
+  id             String            @id @default(uuid())
+  orderId        String
+  order          SubscriptionOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  decision       String
+  reviewerId     String
+  reviewerName   String
+  note           String?           @db.VarChar(500)
+  createdAt      DateTime          @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+model QuotaAddon {
+  id           String              @id @default(uuid())
+  code         String              @unique @db.VarChar(40)
+  name         String              @db.VarChar(80)
+  description  String?             @db.VarChar(300)
+  resourceType String
+  pricePending Boolean             @default(false)
+  quantity     Int
+  priceCents   Int
+  quoteOnly    Boolean             @default(false)
+  currency     String              @default("CNY") @db.VarChar(8)
+  enabled      Boolean             @default(true)
+  sortOrder    Int                 @default(0)
+  orders       SubscriptionOrder[]
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  @@index([enabled, sortOrder])
+}
+
+model EntitlementChange {
+  id                    String              @id @default(uuid())
+  tenantId              String
+  tenant                Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subscriptionId        String
+  subscription          TenantSubscription  @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  orderId               String?
+  order                 SubscriptionOrder?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  changeType            String
+  deviceDelta           Int                 @default(0)
+  pointDelta            Int                 @default(0)
+  scadaProjectDelta     Int                 @default(0)
+  userDelta             Int                 @default(0)
+  historyMonthsDelta    Int                 @default(0)
+  effectiveDeviceLimit  Int
+  effectivePointLimit   Int
+  effectiveScadaLimit   Int
+  effectiveUserLimit    Int
+  description           String?             @db.VarChar(300)
+  createdAt             DateTime            @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+model SubscriptionNotification {
   id        String   @id @default(uuid())
-  name      String
-  status    String   @default("ACTIVE")
-  users     User[]
-  devices   Device[]
-  alarms    Alarm[]
-  loginLogs LoginLog[]
-  operationLogs OperationLog[]
-  deviceLogs DeviceLog[]
-  modelTemplates DeviceModelTemplate[]
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  dedupeKey String   @unique
+  type      String
+  title     String
+  message   String
+  readAt    DateTime?
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, readAt])
+}
+
+model ChangelogEntry {
+  id            String   @id @default(uuid())
+  version       String?  @db.VarChar(30)
+  title         String   @db.VarChar(120)
+  summary       String?  @db.VarChar(300)
+  releaseDate   DateTime
+  surfaces      String[] @default([])
+  category      String   @default("IMPROVEMENT") @db.VarChar(24)
+  items         Json
+  status        String   @default("DRAFT") @db.VarChar(16)
+  createdById   String
+  createdByName String   @db.VarChar(80)
+  publishedAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status, releaseDate])
+  @@index([category, releaseDate])
+}
+
+model ScadaProject {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String   @db.VarChar(80)
+  description String?  @db.VarChar(300)
+  status      String   @default("DRAFT")
+  thumbnail   String?
+  config      Json
+  createdBy   String
+  updatedBy   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId, updatedAt])
+  @@index([tenantId, status])
 }
 
 model Device {
+  id                     String                         @id @default(uuid())
+  tenantId               String
+  tenant                 Tenant                         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deviceKey              String
+  mqttClientId           String                         @unique
+  mqttUsername           String                         @unique
+  mqttPasswordHash       String
+  mqttPasswordUpdatedAt  DateTime                       @default(now())
+  deviceType             String                         @default("DIRECT")
+  gatewayId              String?
+  gateway                Device?                        @relation("GatewayChildren", fields: [gatewayId], references: [id], onDelete: SetNull)
+  children               Device[]                       @relation("GatewayChildren")
+  groupMemberships       DeviceGroupMembership[]
+  userAccesses           UserDeviceAccess[]
+  name                   String
+  protocol               String                         @default("MQTT")
+  status                 String                         @default("OFFLINE")
+  cloudAccessEnabled     Boolean                        @default(true)
+  cloudDisabledAt        DateTime?
+  cloudDisabledBy        String?
+  cloudDisabledReason    String?
+  location               String?
+  latitude               Float?
+  longitude              Float?
+  lastSeenAt             DateTime?
+  reportedConfig         Json?
+  reportedConfigAt       DateTime?
+  alarms                 Alarm[]
+  reportedEvents         GatewayEvent[]                 @relation("GatewayEventGateway")
+  originatedEvents       GatewayEvent[]                 @relation("GatewayEventSource")
+  metrics                DeviceMetric[]
+  alarmRules             DeviceAlarmRule[]
+  logs                   DeviceLog[]
+  factoryGateway         FactoryGateway?
+  remoteConfigTasks      RemoteConfigTask[]
+  commands               DeviceCommand[]                @relation("CommandDevice")
+  routedCommands         DeviceCommand[]                @relation("CommandGateway")
+  topologyDrafts         GatewayTopologyDraft[]         @relation("GatewayTopologyDraftGateway")
+  childCloudRestrictions GatewayChildCloudRestriction[] @relation("GatewayChildCloudRestrictions")
+  createdAt              DateTime                       @default(now())
+  updatedAt              DateTime                       @updatedAt
+
+  @@unique([id, tenantId])
+  @@index([tenantId])
+  @@index([status])
+  @@index([cloudAccessEnabled])
+  @@index([deviceType])
+  @@index([gatewayId])
+  @@index([gatewayId, deviceKey])
+}
+
+model DeviceGroup {
+  id                String                  @id @default(uuid())
+  tenantId          String
+  tenant            Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name              String                  @db.VarChar(50)
+  deviceMemberships DeviceGroupMembership[]
+  userAccesses      UserDeviceGroupAccess[]
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  @@unique([id, tenantId])
+  @@unique([tenantId, name])
+}
+
+model DeviceGroupMembership {
+  deviceId  String
+  groupId   String
+  tenantId  String
+  device    Device      @relation(fields: [deviceId, tenantId], references: [id, tenantId], onDelete: Cascade, onUpdate: Cascade)
+  group     DeviceGroup @relation(fields: [groupId, tenantId], references: [id, tenantId], onDelete: Cascade, onUpdate: Cascade)
+  createdAt DateTime    @default(now())
+
+  @@id([deviceId, groupId])
+  @@index([tenantId, groupId])
+}
+
+model GatewayChildCloudRestriction {
+  id              String   @id @default(uuid())
+  gatewayDeviceId String
+  gateway         Device   @relation("GatewayChildCloudRestrictions", fields: [gatewayDeviceId], references: [id], onDelete: Cascade)
+  childDeviceKey  String
+  disabledAt      DateTime @default(now())
+  disabledBy      String?
+  reason          String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([gatewayDeviceId, childDeviceKey])
+  @@index([childDeviceKey])
+  @@index([disabledAt])
+}
+
+model DeviceCommand {
+  id          String    @id @default(uuid())
+  requestId   String    @unique
+  deviceId    String
+  device      Device    @relation("CommandDevice", fields: [deviceId], references: [id], onDelete: Cascade)
+  gatewayId   String
+  gateway     Device    @relation("CommandGateway", fields: [gatewayId], references: [id], onDelete: Cascade)
+  deviceKey   String
+  metric      String
+  value       Json
+  status      String    @default("SENT")
+  message     String?
+  createdBy   String
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  completedAt DateTime?
+
+  @@index([deviceId, createdAt])
+  @@index([status, expiresAt])
+}
+
+model RemoteConfigTask {
+  id          String    @id @default(uuid())
+  deviceId    String
+  device      Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  version     Int
+  status      String    @default("PENDING")
+  config      Json
+  createdBy   String
+  error       String?
+  sentAt      DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([deviceId, version])
+  @@index([deviceId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model GatewayTopologyDraft {
   id                    String    @id @default(uuid())
-  tenantId              String
-  tenant                Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  deviceKey             String    @unique
-  mqttClientId          String    @unique
-  mqttUsername          String    @unique
-  mqttPasswordHash      String
-  mqttPasswordUpdatedAt DateTime  @default(now())
-  deviceType            String    @default("DIRECT")
-  gatewayId             String?
-  gateway               Device?   @relation("GatewayChildren", fields: [gatewayId], references: [id], onDelete: SetNull)
-  children              Device[]  @relation("GatewayChildren")
-  name                  String
-  protocol              String    @default("MQTT")
-  status                String    @default("OFFLINE")
-  location              String?
-  latitude              Float?
-  longitude             Float?
-  lastSeenAt            DateTime?
-  alarms                Alarm[]
-  metrics               DeviceMetric[]
-  alarmRules            DeviceAlarmRule[]
-  logs                  DeviceLog[]
+  gatewayDeviceId       String
+  gateway               Device    @relation("GatewayTopologyDraftGateway", fields: [gatewayDeviceId], references: [id], onDelete: Cascade)
+  gatewayKey            String
+  reportedConfigVersion String?
+  items                 Json
+  status                String    @default("PENDING")
+  conflicts             Json?
+  reportedAt            DateTime  @default(now())
+  confirmedAt           DateTime?
+  confirmedBy           String?
+  ignoredAt             DateTime?
+  ignoredBy             String?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
-  @@index([tenantId])
+  @@unique([gatewayDeviceId])
+  @@index([gatewayKey])
   @@index([status])
-  @@index([deviceType])
-  @@index([gatewayId])
+  @@index([reportedAt])
+}
+
+model FactoryGateway {
+  id                        String                   @id @default(uuid())
+  hardwareId                String                   @unique
+  chipUsid                  String?                  @unique
+  sn                        String                   @unique
+  deviceSecretHash          String
+  activationSecretEncrypted String?
+  licenseSequence           Int                      @default(0)
+  issuedLicense             Json?
+  reportedLicense           Json?
+  licenseActivatedAt        DateTime?
+  licenseReportedAt         DateTime?
+  bindCodeHash              String
+  bindCodeEncrypted         String?
+  nfcTokenHash              String?
+  nfcTokenEncrypted         String?
+  nfcIssuedAt               DateTime?
+  status                    String                   @default("UNBOUND")
+  batchNo                   String?
+  model                     String                   @default("EG100")
+  product                   ProductModel             @relation(fields: [model], references: [code], onDelete: Restrict, onUpdate: Restrict)
+  deviceId                  String?                  @unique
+  device                    Device?                  @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  producedAt                DateTime?
+  firstSeenAt               DateTime?
+  lastSeenAt                DateTime?
+  boundAt                   DateTime?
+  createdAt                 DateTime                 @default(now())
+  updatedAt                 DateTime                 @updatedAt
+  printJobs                 LabelPrintJob[]
+  otaTasks                  OtaTask[]
+  maintenanceTasks          GatewayMaintenanceTask[]
+
+  @@index([status])
+  @@index([batchNo])
+  @@index([lastSeenAt])
+}
+
+model GatewayMaintenanceTask {
+  id          String         @id @default(uuid())
+  gatewayId   String
+  gateway     FactoryGateway @relation(fields: [gatewayId], references: [id], onDelete: Restrict)
+  action      String
+  status      String         @default("PENDING")
+  message     String?
+  createdBy   String
+  createdAt   DateTime       @default(now())
+  expiresAt   DateTime
+  completedAt DateTime?
+
+  @@index([gatewayId, createdAt])
+  @@index([status, expiresAt])
+}
+
+model OtaPackage {
+  id             String    @id @default(uuid())
+  model          String
+  release        BigInt
+  version        String
+  keyId          String
+  artifactSha256 String
+  packageSha256  String    @unique
+  fileName       String    @unique
+  size           Int
+  fileAvailable  Boolean   @default(true)
+  purgedAt       DateTime?
+  createdBy      String
+  createdAt      DateTime  @default(now())
+  tasks          OtaTask[]
+
+  @@index([model, release])
+}
+
+model OtaTask {
+  id          String         @id @default(uuid())
+  gatewayId   String
+  gateway     FactoryGateway @relation(fields: [gatewayId], references: [id], onDelete: Restrict)
+  packageId   String
+  package     OtaPackage     @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  status      String         @default("PENDING")
+  message     String?
+  createdBy   String
+  createdAt   DateTime       @default(now())
+  expiresAt   DateTime
+  completedAt DateTime?
+
+  @@index([gatewayId, createdAt])
+  @@index([status, expiresAt])
+}
+
+model ProductModel {
+  code              String           @id
+  name              String
+  ethernetPortCount Int?
+  serialPortCount   Int?
+  rs232PortCount    Int?
+  rs485PortCount    Int?
+  canPortCount      Int?
+  supports4G        Boolean?
+  supportsWifi      Boolean?
+  enabled           Boolean          @default(true)
+  description       String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  gateways          FactoryGateway[]
+}
+
+// Permanent counters survive gateway removal; successful registrations allocate
+// the sequence atomically in the same transaction as the gateway record.
+model FactoryProductionCounter {
+  prefix       String @id
+  lastSequence Int
+}
+
+model LabelPrintAgent {
+  id          String          @id @default(uuid())
+  name        String
+  tokenHash   String          @unique
+  printerName String?
+  status      String          @default("OFFLINE")
+  lastSeenAt  DateTime?
+  lastError   String?
+  jobs        LabelPrintJob[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([status])
+  @@index([lastSeenAt])
+}
+
+model LabelPrintJob {
+  id               String          @id @default(uuid())
+  agentId          String
+  agent            LabelPrintAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  factoryGatewayId String
+  factoryGateway   FactoryGateway  @relation(fields: [factoryGatewayId], references: [id], onDelete: Cascade)
+  sn               String
+  labelSize        String          @default("50x30")
+  copies           Int             @default(1)
+  status           String          @default("PENDING")
+  attempts         Int             @default(0)
+  createdBy        String
+  claimedAt        DateTime?
+  completedAt      DateTime?
+  error            String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@index([agentId, status, createdAt])
+  @@index([factoryGatewayId])
+  @@index([createdAt])
 }
 
 model DeviceMetric {
@@ -122,8 +708,8 @@ model DeviceAlarmRule {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  @@index([deviceId])
   @@unique([deviceId, identifier, operator])
+  @@index([deviceId])
 }
 
 model Alarm {
@@ -147,23 +733,97 @@ model Alarm {
   @@index([status])
 }
 
+model GatewayEvent {
+  id              String    @id @default(uuid())
+  dedupeKey       String    @unique
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  gatewayId       String
+  gateway         Device    @relation("GatewayEventGateway", fields: [gatewayId], references: [id], onDelete: Cascade)
+  deviceId        String?
+  device          Device?   @relation("GatewayEventSource", fields: [deviceId], references: [id], onDelete: SetNull)
+  sourceEventId   String
+  eventType       String    @default("ALARM")
+  state           String
+  level           String
+  ruleId          String?
+  ruleName        String?
+  parentRuleId    String?
+  parentRuleName  String?
+  limitKey        String?
+  limitName       String?
+  deviceKey       String?
+  pointName       String?
+  metric          String?
+  valueText       String?
+  unit            String?
+  threshold       Float?
+  quality         String?
+  message         String
+  acknowledged    Boolean   @default(false)
+  occurredAt      DateTime
+  sourceUpdatedAt DateTime
+  acknowledgedAt  DateTime?
+  recoveredAt     DateTime?
+  reportedAt      DateTime
+  detail          Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([tenantId, occurredAt])
+  @@index([gatewayId, occurredAt])
+  @@index([deviceId, occurredAt])
+  @@index([state, occurredAt])
+  @@index([level, occurredAt])
+  @@index([sourceEventId])
+}
+
 model User {
-  id        String   @id @default(uuid())
-  tenantId  String?
-  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  username  String   @unique
-  password  String
-  nickname  String?
-  phone     String?
-  email     String?
-  role      String
-  status    String   @default("ACTIVE")
-  loginLogs LoginLog[]
-  operationLogs OperationLog[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                       String                  @id @default(uuid())
+  tenantId                 String?
+  tenant                   Tenant?                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  username                 String
+  password                 String
+  nickname                 String?
+  avatarUrl                String?
+  phone                    String?                 @unique
+  email                    String?                 @unique
+  role                     String
+  status                   String                  @default("ACTIVE")
+  permissions              String[]                @default(["DASHBOARD_VIEW", "DEVICE_VIEW", "MAP_VIEW", "SCADA_VIEW", "MODEL_VIEW", "ALARM_VIEW", "EVENT_VIEW"])
+  deviceScopeMode          String                  @default("ALL")
+  deviceAccesses           UserDeviceAccess[]
+  deviceGroupAccesses      UserDeviceGroupAccess[]
+  alarmNotificationsReadAt DateTime?
+  adminNotificationsReadAt DateTime?
+  loginLogs                LoginLog[]
+  operationLogs            OperationLog[]
+  createdAt                DateTime                @default(now())
+  updatedAt                DateTime                @updatedAt
 
   @@index([tenantId])
+}
+
+model UserDeviceAccess {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId  String
+  device    Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([userId, deviceId])
+  @@index([deviceId])
+}
+
+model UserDeviceGroupAccess {
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  groupId   String
+  group     DeviceGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  createdAt DateTime    @default(now())
+
+  @@id([userId, groupId])
+  @@index([groupId])
 }
 
 model LoginLog {

@@ -6,9 +6,12 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { OperationLogsService } from '../operation-logs/operation-logs.service';
 import { AlarmsService } from './alarms.service';
+import { Permissions } from '../common/decorators/permissions.decorator';
+import { PermissionsGuard } from '../common/guards/permissions.guard';
 
 @Controller('alarms')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+@Permissions('ALARM_VIEW')
 export class AlarmsController {
   constructor(
     private readonly alarmsService: AlarmsService,
@@ -32,8 +35,15 @@ export class AlarmsController {
     return this.alarmsService.stream(user);
   }
 
+  @Patch('notifications/read')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  markNotificationsRead(@CurrentUser() user: AuthUser) {
+    return this.alarmsService.markNotificationsRead(user);
+  }
+
   @Patch(':id/resolve')
-  @Roles('SUPER_ADMIN', 'TENANT_ADMIN')
+  @Roles('SUPER_ADMIN', 'TENANT_ADMIN', 'TENANT_USER')
+  @Permissions('ALARM_RESOLVE')
   async resolve(@CurrentUser() user: AuthUser, @Param('id') id: string, @Req() request: Request) {
     const alarm = await this.alarmsService.resolve(user, id);
     await this.operationLogsService.record(user, {

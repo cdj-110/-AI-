@@ -1,0 +1,96 @@
+.page .point-sheet-table th.point-sheet-select,
+.page .point-sheet-table td.point-sheet-select {
+  min-width: 36px;
+  padding: 0;
+  text-align: center;
+  vertical-align: middle;
+}
+/* Narrow utility columns must not inherit the data cells' 88px minimum.
+   After initialization, the resizer's colgroup still owns column widths. */
+.page .point-sheet-table:not(.interactive-point-table):not(.resizable-opcda-table) .point-sheet-select {
+  width: 36px;
+  min-width: 36px;
+}
+.page .point-sheet-table th.point-sheet-select input[type="checkbox"],
+.page .point-sheet-table td.point-sheet-select input[type="checkbox"] {
+  display: block;
+  box-sizing: border-box;
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  margin: 0 auto;
+  padding: 0;
+}
+
+.page .point-sheet-table th.point-sheet-index,
+.page .point-sheet-table td.point-sheet-index {
+  min-width: 42px;
+  padding: 0;
+  text-align: center;
+  vertical-align: middle;
+}
+.page .point-sheet-table:not(.interactive-point-table):not(.resizable-opcda-table) .point-sheet-index {
+  width: 46px;
+}
+
+.page .point-sheet-table td.point-name-cell,
+.page .point-sheet-table td.point-metric-cell,
+.page .point-sheet-table td.point-address-cell {
+  overflow: hidden !important;
+}
+
+.page .point-sheet-table td.point-name-cell input,
+.page .point-sheet-table td.point-metric-cell input,
+.page .point-sheet-table td.point-address-cell input {
+  display: block;
+  width: 100% !important;
+  max-width: 100%;
+  min-width: 0 !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.point-sheet-table td.point-live-value > span {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opcda-point-table-wrap .resizable-opcda-table td.opcda-quality-column {
+  overflow: hidden !important;
+}
+
+.opcda-point-table-wrap .resizable-opcda-table .opcda-quality {
+  max-width: calc(100% - 4px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.page .point-sheet-table:not(.interactive-point-table) .point-data-type-column {
+  width: 164px !important;
+  min-width: 164px !important;
+}
+.page .point-sheet-table .point-data-type-select {
+  box-sizing: border-box;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100%;
+}
+.page .point-sheet-table .point-type-tag {
+  display: inline-block;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid #dfe6ef;
+  border-radius: 5px;
+  background: #f1f5f9;
+  color: #475569;
+  font: 12px/18px system-ui, sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}

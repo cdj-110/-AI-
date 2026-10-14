@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test:gateway-point-access": "npm run build && node scripts/verify-gateway-point-access.cjs",
+    "test:startup-readiness": "npm run build && node scripts/verify-startup-readiness.cjs",
     "start": "node dist/main.js",
     "start:dev": "ts-node src/main.ts",
     "prisma:generate": "prisma generate"

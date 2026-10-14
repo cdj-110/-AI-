@@ -1,4 +1,4 @@
-import { IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class CreateTenantDto {
   @IsString()
@@ -8,4 +8,8 @@ export class CreateTenantDto {
   @IsIn(['ACTIVE', 'DISABLED'])
   @IsOptional()
   status?: string;
+
+  @IsBoolean()
+  @IsOptional()
+  deviceCloudAccessDisabled?: boolean;
 }

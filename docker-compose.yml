@@ -1,10 +1,11 @@
 services:
   postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: weikong_iot
       POSTGRES_USER: weikong
-      POSTGRES_PASSWORD: weikong123
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
@@ -17,17 +18,24 @@ services:
 
   timescaledb:
     image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: weikong_ts
       POSTGRES_USER: weikong
-      POSTGRES_PASSWORD: weikong123
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     ports:
       - "5433:5432"
     volumes:
       - timescale_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weikong -d weikong_ts"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
@@ -35,6 +43,10 @@ services:
 
   emqx:
     image: emqx/emqx:latest
+    restart: unless-stopped
+    environment:
+      EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_DASHBOARD_USERNAME:-admin}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:?Set EMQX_DASHBOARD_PASSWORD}
     volumes:
       - ./infra/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
       - ./infra/emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
@@ -46,21 +58,78 @@ services:
 
   api:
     build: ./apps/api
+    restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://weikong:weikong123@postgres:5432/weikong_iot?schema=public
+      DATABASE_URL: postgresql://weikong:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/weikong_iot?schema=public
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      JWT_SECRET: weikong_iot_secret
-      JWT_EXPIRES_IN: 7d
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_SECRET_FILE: /var/lib/weikong/secrets/jwt-secret
+      FACTORY_CREDENTIAL_ENCRYPTION_KEY: ${FACTORY_CREDENTIAL_ENCRYPTION_KEY:-}
+      ACTIVATION_SIGNING_PRIVATE_KEY: ${ACTIVATION_SIGNING_PRIVATE_KEY:-}
+      ACTIVATION_SIGNING_KEY_ID: ${ACTIVATION_SIGNING_KEY_ID:-}
+      ACTIVATION_LICENSE_DAYS: ${ACTIVATION_LICENSE_DAYS:-0}
+      ACTIVATION_CLOUD_API: ${ACTIVATION_CLOUD_API:-}
+      ACTIVATION_REMOTE_ACCESS_ENDPOINT: ${ACTIVATION_REMOTE_ACCESS_ENDPOINT:-}
+      OTA_TRUSTED_PUBLIC_KEYS: ${OTA_TRUSTED_PUBLIC_KEYS:-}
+      OTA_DOWNLOAD_SECRET: ${OTA_DOWNLOAD_SECRET:-}
+      OTA_PUBLIC_BASE_URL: ${OTA_PUBLIC_BASE_URL:-}
+      OTA_PACKAGE_DIR: /var/lib/weikong/ota
+      AVATAR_DIR: /var/lib/weikong/avatars
+      PAYMENT_VOUCHER_DIR: /var/lib/weikong/payment-vouchers
+      ALIPAY_ENABLED: ${ALIPAY_ENABLED:-true}
+      ALIPAY_SANDBOX: ${ALIPAY_SANDBOX:-true}
+      ALIPAY_APP_ID: ${ALIPAY_APP_ID:-9021000168661943}
+      ALIPAY_SELLER_ID: ${ALIPAY_SELLER_ID:-2088721113578894}
+      ALIPAY_GATEWAY_URL: ${ALIPAY_GATEWAY_URL:-https://openapi-sandbox.dl.alipaydev.com/gateway.do}
+      ALIPAY_APP_PRIVATE_KEY_FILE: /var/lib/weikong/secrets/alipay-sandbox-app-private-key.pem
+      ALIPAY_PUBLIC_KEY_FILE: /var/lib/weikong/secrets/alipay-sandbox-alipay-public-key.pem
+      ALIPAY_SANDBOX_TEST_AMOUNT_CENTS: ${ALIPAY_SANDBOX_TEST_AMOUNT_CENTS:-1}
+      ALIPAY_NOTIFY_URL: ${ALIPAY_NOTIFY_URL:-}
+      ALIPAY_RETURN_URL: ${ALIPAY_RETURN_URL:-}
+      # JWT 覆盖完整绝对会话周期；实际空闲失效由 Redis 会话 TTL 控制。
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+      AUTH_ADMIN_IDLE_SECONDS: ${AUTH_ADMIN_IDLE_SECONDS:-1800}
+      AUTH_TENANT_IDLE_SECONDS: ${AUTH_TENANT_IDLE_SECONDS:-3600}
+      AUTH_SESSION_ABSOLUTE_SECONDS: ${AUTH_SESSION_ABSOLUTE_SECONDS:-43200}
+      MAIL_HOST: ${MAIL_HOST:-smtp.163.com}
+      MAIL_PORT: ${MAIL_PORT:-465}
+      MAIL_SECURE: ${MAIL_SECURE:-true}
+      MAIL_USER: ${MAIL_USER:-weikong_notice@163.com}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_PASSWORD_FILE: /var/lib/weikong/secrets/mail-password
+      MAIL_FROM: ${MAIL_FROM:-微控物联云平台 <weikong_notice@163.com>}
+      EMAIL_CODE_TTL_SECONDS: ${EMAIL_CODE_TTL_SECONDS:-300}
+      EMAIL_CODE_COOLDOWN_SECONDS: ${EMAIL_CODE_COOLDOWN_SECONDS:-60}
       PORT: 3100
-      TIMESCALE_DATABASE_URL: postgresql://weikong:weikong123@timescaledb:5432/weikong_ts
-      MQTT_PUBLIC_HOST: localhost
-      MQTT_PUBLIC_PORT: 1883
+      REMOTE_ACCESS_PORT: 3201
+      REMOTE_ACCESS_PUBLIC_URL: ${REMOTE_ACCESS_PUBLIC_URL:-}
+      REMOTE_ACCESS_SESSION_IDLE_SECONDS: ${REMOTE_ACCESS_SESSION_IDLE_SECONDS:-900}
+      REMOTE_ACCESS_LINK_TTL_SECONDS: ${REMOTE_ACCESS_LINK_TTL_SECONDS:-900}
+      REMOTE_ACCESS_COOKIE_MAX_AGE_SECONDS: ${REMOTE_ACCESS_COOKIE_MAX_AGE_SECONDS:-604800}
+      HISTORY_CLEANUP_ENABLED: ${HISTORY_CLEANUP_ENABLED:-false}
+      HISTORY_CLEANUP_ACTIVATED_AT: ${HISTORY_CLEANUP_ACTIVATED_AT:-}
+      TIMESCALE_DATABASE_URL: postgresql://weikong:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@timescaledb:5432/weikong_ts
+      MQTT_PUBLIC_HOST: ${MQTT_PUBLIC_HOST:-127.0.0.1}
+      MQTT_PUBLIC_PORT: ${MQTT_PUBLIC_PORT:-1883}
       MQTT_WS_PORT: 8083
+      MQTT_URL: mqtt://emqx:1883
+      MQTT_USERNAME: platform-ingest
       MQTT_INGEST_USERNAME: platform-ingest
       MQTT_INGEST_PASSWORD: platform-ingest-secret
+      EMQX_API_URL: ${EMQX_API_URL:-http://emqx:18083/api/v5}
+      EMQX_API_KEY: ${EMQX_API_KEY:-}
+      EMQX_API_SECRET: ${EMQX_API_SECRET:-}
+      EMQX_API_CREDENTIALS_FILE: ${EMQX_API_CREDENTIALS_FILE-/var/lib/weikong/secrets/emqx-connection-api.json}
     ports:
       - "3100:3100"
+      - "3201:3201"
+    volumes:
+      - ota_packages:/var/lib/weikong/ota
+      - api_secrets:/var/lib/weikong/secrets
+      - user_avatars:/var/lib/weikong/avatars
+      - payment_vouchers:/var/lib/weikong/payment-vouchers
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,12 +138,13 @@ services:
 
   ingest:
     build: ./apps/ingest
+    restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://weikong:weikong123@postgres:5432/weikong_iot?schema=public
+      DATABASE_URL: postgresql://weikong:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/weikong_iot?schema=public
       MQTT_URL: mqtt://emqx:1883
       MQTT_USERNAME: platform-ingest
       MQTT_INGEST_PASSWORD: platform-ingest-secret
-      TIMESCALE_DATABASE_URL: postgresql://weikong:weikong123@timescaledb:5432/weikong_ts
+      TIMESCALE_DATABASE_URL: postgresql://weikong:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@timescaledb:5432/weikong_ts
       DEVICE_OFFLINE_TIMEOUT_SECONDS: 90
       DEVICE_OFFLINE_SCAN_INTERVAL_SECONDS: 30
       DEVICE_DISCONNECT_GRACE_SECONDS: 3
@@ -87,15 +157,51 @@ services:
       emqx:
         condition: service_started
       timescaledb:
-        condition: service_started
+        condition: service_healthy
 
   web:
+    restart: unless-stopped
     build:
       context: ./apps/web
       args:
-        VITE_API_BASE_URL: http://localhost:3100
+        PORTAL_MODE: tenant
+        VITE_API_BASE_URL: ""
+        VITE_GOVIEW_DESIGNER_URL: ${VITE_GOVIEW_DESIGNER_URL:-}
     ports:
-      - "5173:80"
+      - "5174:80"
+    depends_on:
+      - api
+
+  goview-designer:
+    restart: unless-stopped
+    build:
+      context: ./apps/goview-designer
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+  admin-web:
+    restart: unless-stopped
+    build:
+      context: ./apps/web
+      args:
+        PORTAL_MODE: admin
+        VITE_API_BASE_URL: ""
+    ports:
+      - "5176:80"
+    depends_on:
+      - api
+
+  ota-https:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "3443:443"
+    volumes:
+      - ./infra/ota-https/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./secrets/https-lan-20260921/server.crt:/etc/nginx/tls/server.crt:ro
+      - ./secrets/https-lan-20260921/server.key:/etc/nginx/tls/server.key:ro
     depends_on:
       - api
 
@@ -103,3 +209,7 @@ volumes:
   postgres_data:
   timescale_data:
   redis_data:
+  ota_packages:
+  api_secrets:
+  user_avatars:
+  payment_vouchers:

@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict'
+import { createServer } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+const server=await createServer({configFile:false,plugins:[vue()],server:{host:'127.0.0.1',port:0},logLevel:'error'})
+let browser
+try{
+  await server.listen()
+  browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHANNEL?{channel:process.env.PLAYWRIGHT_CHANNEL}:{})})
+  const page=await browser.newPage()
+  const errors=[]
+  page.on('pageerror',error=>errors.push(error.message))
+  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/scripts/fixtures/point-metric-input.html`)
+  const input=page.getByRole('textbox',{name:'点位标识符'}).first()
+  const committed=()=>page.locator('#committed').textContent()
+  const commits=()=>page.locator('#commits').textContent()
+  await input.click()
+  assert.deepEqual(await input.evaluate(el=>[el.selectionStart,el.selectionEnd]),[0,9])
+  await input.press('Backspace')
+  assert.equal(await input.inputValue(),'')
+  assert.equal(await committed(),'opcua-P01')
+  await input.pressSequentially('custom_temperature',{delay:60})
+  assert.equal(await input.inputValue(),'custom_temperature')
+  assert.equal(await input.evaluate(el=>el===document.activeElement),true)
+  assert.equal(await committed(),'opcua-P01','typing does not mutate the row key')
+  assert.equal(await commits(),'0')
+  await input.press('Enter')
+  assert.equal(await committed(),'custom_temperature')
+  assert.equal(await commits(),'1','Enter commits once')
+  await input.click()
+  await input.fill('cancel_me')
+  await input.press('Escape')
+  assert.equal(await input.inputValue(),'custom_temperature')
+  assert.equal(await commits(),'1')
+  await input.fill('')
+  await page.locator('#outside').click()
+  assert.equal(await input.inputValue(),'custom_temperature','empty edit restores the previous identifier')
+  assert.equal(await commits(),'1')
+  await input.fill('  pasted_identifier  ')
+  await page.locator('#outside').click()
+  assert.equal(await committed(),'pasted_identifier')
+  assert.equal(await commits(),'2')
+  assert.equal(await page.getByRole('textbox',{name:'点位标识符'}).last().isDisabled(),true)
+  assert.deepEqual(errors,[])
+  console.log('Browser: selection, clear/retype with live updates, Enter, Escape, empty cancel, blur/trim and readonly: ok')
+}finally{
+  await browser?.close()
+  await server.close()
+}

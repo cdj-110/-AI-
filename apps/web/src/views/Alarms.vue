@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { apiRequest } from '../api/request';
 import { useUserStore } from '../stores/user';
+import { hasPermission } from '../utils/permissions';
 
 interface AlarmItem {
   id: string;
@@ -24,7 +25,7 @@ const alarms = ref<AlarmItem[]>([]);
 const total = ref(0);
 const query = reactive({ page: 1, pageSize: 10, status: '' });
 const isSuperAdmin = computed(() => userStore.userInfo?.role === 'SUPER_ADMIN');
-const canManage = computed(() => userStore.userInfo?.role !== 'TENANT_USER');
+const canResolve = computed(() => hasPermission(userStore.userInfo, 'ALARM_RESOLVE'));
 
 async function loadAlarms() {
   loading.value = true;
@@ -74,7 +75,7 @@ onMounted(loadAlarms);
         <el-table-column prop="message" label="告警内容" min-width="260" show-overflow-tooltip />
         <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag :type="row.status === 'OPEN' ? 'danger' : 'success'">{{ row.status === 'OPEN' ? '未处理' : '已恢复' }}</el-tag></template></el-table-column>
         <el-table-column label="发生时间" width="180"><template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template></el-table-column>
-        <el-table-column v-if="canManage" label="操作" width="90" fixed="right">
+        <el-table-column v-if="canResolve" label="操作" width="90" fixed="right">
           <template #default="{ row }"><el-button v-if="row.status === 'OPEN'" link type="primary" @click="resolveAlarm(row)">处理</el-button><span v-else class="muted">-</span></template>
         </el-table-column>
       </el-table>

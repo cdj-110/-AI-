@@ -1,0 +1,32 @@
+package collector
+
+import (
+ "strings"
+ "testing"
+)
+
+func TestAuditDictionaryActiveEnergyIdentifiers(t *testing.T) {
+ for key, want := range map[string]string{"forward-active-total":"00010000","reverse-active-total":"00020000"} {
+  item, ok := findDLT645Item(key)
+  if !ok {t.Fatalf("missing %s",key)}
+  if item.DI2007 != want {t.Errorf("%s DI=%s, want %s",key,item.DI2007,want)}
+ }
+}
+
+func TestAuditSignedBCDOverflowRejected(t *testing.T) {
+ raw, err := encodeDLT645Value(900001,"signed-bcd",3,0)
+ if err != nil {return}
+ value, _, err := decodeDLT645Value(raw,"signed-bcd",0)
+ t.Fatalf("out-of-range signed BCD must be rejected; encoded=% X decoded=%v err=%v",raw,value,err)
+}
+
+func TestAuditDatetimePreservesDate(t *testing.T) {
+ value, _, err := decodeDLT645Value([]byte{0x56,0x34,0x12,0x09,0x09,0x26},"datetime",0)
+ if err != nil {t.Fatal(err)}
+ if !strings.Contains(value.(string),"2026") {t.Fatalf("datetime lost date: %v",value)}
+}
+
+func TestAuditDateRejectsInvalidBCD(t *testing.T) {
+ value, _, err := decodeDLT645Value([]byte{0xFA,0x99,0x26},"date",0)
+ if err == nil {t.Fatalf("invalid BCD/date accepted: %v",value)}
+}

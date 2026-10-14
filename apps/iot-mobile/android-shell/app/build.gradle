@@ -1,0 +1,49 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.weikong.iotcloud"
+    compileSdk 35
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId "com.weikong.iotcloud"
+        minSdk 23
+        targetSdk 35
+        versionCode 114
+        versionName "0.4.0-alarm-notification"
+    }
+
+    flavorDimensions "portal"
+    productFlavors {
+        tenant {
+            dimension "portal"
+            applicationId "com.weikong.iotcloud"
+            manifestPlaceholders = [appLabel: "物联云"]
+        }
+        admin {
+            dimension "portal"
+            applicationId "com.weikong.iotcloud.admin"
+            versionCode 132
+            versionName "0.5.0-cloud-print-feedback"
+            manifestPlaceholders = [appLabel: "物联云管理端"]
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    // zxing-android-embedded uses ContextCompat when opening the camera.
+    // Keep this explicit so the lightweight WebView shell packages AndroidX Core.
+    implementation "androidx.core:core:1.13.1"
+    implementation "com.journeyapps:zxing-android-embedded:4.3.0"
+}

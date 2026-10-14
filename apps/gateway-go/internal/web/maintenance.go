@@ -1,0 +1,296 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"weikong-iot-platform/apps/gateway-go/internal/config"
+)
+
+const restartDelayEnv = "GATEWAY_RESTART_DELAY_MS"
+
+type pingRequest struct {
+	Target string `json:"target"`
+	Count  int    `json:"count"`
+}
+
+type factoryResetRequest struct {
+	Sensitive sensitiveActionRequest `json:"verification"`
+}
+
+func (s *Server) pingDiagnostic(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body pingRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return
+	}
+	target := strings.TrimSpace(body.Target)
+	if !validDiagnosticTarget(target) {
+		http.Error(writer, "请输入合法的 IP 地址或域名", http.StatusBadRequest)
+		return
+	}
+	count := body.Count
+	if count <= 0 || count > 10 {
+		count = 4
+	}
+
+	ctx, cancel := context.WithTimeout(request.Context(), time.Duration(count*3+3)*time.Second)
+	defer cancel()
+	args := pingArgs(target, count)
+	output, err := exec.CommandContext(ctx, "ping", args...).CombinedOutput()
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(writer).Encode(map[string]interface{}{
+		"ok":     err == nil,
+		"target": target,
+		"output": string(output),
+	})
+}
+
+func validDiagnosticTarget(target string) bool {
+	if target == "" || strings.HasPrefix(target, "-") || strings.ContainsAny(target, " \t\r\n") {
+		return false
+	}
+	return net.ParseIP(target) != nil || validNTPServer(target)
+}
+
+func pingArgs(target string, count int) []string {
+	if runtime.GOOS == "windows" {
+		return []string{"-n", strconv.Itoa(count), target}
+	}
+	return []string{"-c", strconv.Itoa(count), "-W", "3", target}
+}
+
+func (s *Server) restartService(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body sensitiveActionRequest
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 16*1024)).Decode(&body); err != nil {
+		http.Error(writer, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+	if err := s.verifySensitiveAction(request, body); err != nil {
+		writeSensitiveActionError(writer, err)
+		return
+	}
+	if err := scheduleServiceRestart(); err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(writer).Encode(map[string]interface{}{"ok": true, "message": "gateway service is restarting"})
+}
+
+func (s *Server) rebootGateway(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if runtime.GOOS == "windows" {
+		http.Error(writer, "gateway reboot is disabled on Windows local test builds", http.StatusBadRequest)
+		return
+	}
+	var body sensitiveActionRequest
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 16*1024)).Decode(&body); err != nil {
+		http.Error(writer, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+	if err := s.verifySensitiveAction(request, body); err != nil {
+		writeSensitiveActionError(writer, err)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(writer).Encode(map[string]interface{}{"ok": true, "message": "gateway is rebooting"})
+	_ = http.NewResponseController(writer).Flush()
+	go func() {
+		// Give the response time to reach the browser before the operating system
+		// tears down the network stack. The UI has already painted its wait screen.
+		time.Sleep(800 * time.Millisecond)
+		_ = exec.Command("reboot").Start()
+	}()
+}
+
+func (s *Server) factoryReset(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body factoryResetRequest
+	if request.Body != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64*1024))
+		if err := decoder.Decode(&body); err != nil && err.Error() != "EOF" {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if err := s.verifySensitiveAction(request, body.Sensitive); err != nil {
+		writeSensitiveActionError(writer, err)
+		return
+	}
+	current, err := s.readRawConfig()
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	backup, err := s.createFactoryResetBackup(current)
+	if err != nil {
+		http.Error(writer, "恢复前自动备份失败，未执行恢复出厂设置："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	next := factoryDefaultConfig(current)
+	if err := s.saveAndApplyConfig(next); err != nil {
+		http.Error(writer, "恢复出厂设置失败；备份位于 "+backup.Path+"："+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(writer).Encode(map[string]interface{}{
+		"ok":              true,
+		"gatewayKey":      next.GatewayKey,
+		"restartRequired": false,
+		"backup":          backup,
+	})
+}
+
+func factoryDefaultConfig(current config.Config) config.Config {
+	disabled := false
+	gatewayKey := strings.TrimSpace(current.GatewayKey)
+	if gatewayKey == "" {
+		gatewayKey = "gateway"
+	}
+	next := config.Config{
+		GatewayKey:             gatewayKey,
+		CollectIntervalSeconds: 5,
+		CacheFile:              ".runtime/gateway-spool.jsonl",
+		OfflineCache: config.OfflineCacheConfig{
+			Enabled:   false,
+			MaxSizeMB: 16,
+		},
+		HistoryStorage: config.HistoryStorageConfig{
+			Enabled:             false,
+			MaxSizeMB:           16,
+			StoragePath:         config.DefaultHistoryStoragePath,
+			SelectionMode:       "all",
+			SaveMode:            "interval",
+			SaveIntervalSeconds: 1,
+		},
+		Activation: config.ActivationConfig{
+			Enabled: &disabled,
+		},
+		MQTT: config.MQTTConfig{
+			Enabled: &disabled,
+		},
+		WiFi: config.WiFiConfig{
+			Enabled: false,
+		},
+		Cellular: config.CellularConfig{
+			Enabled: &disabled,
+		},
+		ForwardSlave: config.FeatureConfig{
+			Enabled: false,
+			Listen:  "0.0.0.0:1502",
+		},
+		Web:      current.Web,
+		Security: current.Security,
+		Watchdog: current.Watchdog,
+	}
+	if next.Web.Listen == "" {
+		next.Web = config.ListenerConfig{Enabled: true, Listen: "0.0.0.0:8088"}
+	}
+	next.ApplyDefaults()
+	next.Devices = nil
+	next.Points = nil
+	return next
+}
+
+func isSuperAdminUser(user currentUserInfo) bool {
+	return user.Username == "admin"
+}
+
+func (s *Server) verifySuperAdminPassword(password string) bool {
+	password = strings.TrimSpace(password)
+	if password == "" {
+		return false
+	}
+	security, err := s.loadSecurity()
+	if err == nil && len(security.Users) > 0 {
+		for _, user := range security.Users {
+			if user.Username == "admin" && user.Enabled && verifyPasswordHash(user.PasswordHash, password) {
+				return true
+			}
+		}
+		return false
+	}
+	return s.authState().password == password
+}
+
+func scheduleSelfRestart() error {
+	if os.Getenv("GATEWAY_SUPERVISED") == "1" {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable failed: %w", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory failed: %w", err)
+	}
+	args := append([]string(nil), os.Args[1:]...)
+	command := exec.Command(exe, args...)
+	command.Dir = cwd
+	command.Env = restartEnv(os.Environ())
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start replacement process failed: %w", err)
+	}
+	return command.Process.Release()
+}
+
+func scheduleServiceRestart() error {
+	if runtime.GOOS != "windows" {
+		if _, err := os.Stat("/etc/init.d/S99weikong-gateway"); err == nil {
+			command := exec.Command("sh", "-c", "sleep 1; /etc/init.d/S99weikong-gateway restart")
+			command.Stdout = nil
+			command.Stderr = nil
+			if err := command.Start(); err != nil {
+				return fmt.Errorf("schedule init restart failed: %w", err)
+			}
+			return command.Process.Release()
+		}
+	}
+	if err := scheduleSelfRestart(); err != nil {
+		return err
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		os.Exit(0)
+	}()
+	return nil
+}
+
+func restartEnv(env []string) []string {
+	filtered := make([]string, 0, len(env)+1)
+	prefix := restartDelayEnv + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return append(filtered, restartDelayEnv+"=1200")
+}

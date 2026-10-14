@@ -1,0 +1,152 @@
+.point-sheet:has(.dlt645-point-table) > .table-wrap:not(.dlt645-point-table) {
+  display: none;
+}
+
+.dlt645-point-table table {
+  width: max-content;
+  min-width: 1760px;
+}
+
+.dlt645-point-table th:nth-child(3),
+.dlt645-point-table td:nth-child(3) {
+  width: 250px !important;
+  min-width: 250px !important;
+}
+
+.dlt645-point-table th:nth-child(4),
+.dlt645-point-table td:nth-child(4),
+.dlt645-point-table th:nth-child(8),
+.dlt645-point-table td:nth-child(8) {
+  width: 150px !important;
+  min-width: 150px !important;
+}
+
+.dlt645-point-table th:nth-child(5),
+.dlt645-point-table td:nth-child(5) {
+  width: 120px !important;
+  min-width: 120px !important;
+}
+
+.dlt645-point-table th:nth-child(9),
+.dlt645-point-table td:nth-child(9) {
+  width: 180px !important;
+  min-width: 180px !important;
+}
+
+.dlt645-point-table .dlt645-status-column {
+  width: 190px !important;
+  min-width: 190px !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dlt645-point-table .point-sheet-actions {
+  width: 210px !important;
+  min-width: 210px !important;
+}
+
+.dlt645-manual-editor {
+  grid-template-columns: 220px 180px minmax(260px, 1fr);
+  align-items: end;
+  padding: 10px 12px;
+  border: 1px solid #dbe7f5;
+  border-radius: 9px;
+  background: #f8fbff;
+}
+
+/* Meter settings use their own layout, not OPC DA's sidebar-heading grid. */
+.dlt-device-config { display: grid; gap: 12px; min-width: 0; }
+.dlt-device-config .dlt-config-section {
+  min-width: 0;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid #dfe7f1;
+  border-radius: 10px;
+  background: #fff;
+}
+.dlt-config-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+.dlt-config-heading h4 { margin: 0; color: #1e293b; font-size: 14px; }
+.dlt-config-heading > span { color: #8492a6; font-size: 12px; }
+.dlt-device-config .dlt-config-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px 20px; }
+.dlt-config-grid label { display: grid; gap: 6px; min-width: 0; color: #52627a; font-size: 12px; font-weight: 500; }
+.page .dlt-config-grid input,.page .dlt-config-grid select { box-sizing: border-box; min-width: 0; width: 100%; }
+.dlt-config-note { margin-top: 14px; padding: 10px 12px; border-radius: 6px; background: #f7f9fc; color: #64748b; font-size: 12px; line-height: 1.6; }
+.dlt-config-note p { margin: 0; }
+.dlt-config-note p + p { margin-top: 4px; }
+.dlt-config-credentials > summary { cursor: pointer; color: #334155; font-size: 13px; font-weight: 600; line-height: 1.6; }
+.dlt-config-credentials > summary span { margin-left: 12px; color: #8492a6; font-size: 12px; font-weight: 400; }
+.dlt-config-credentials[open] > summary { margin-bottom: 14px; }
+.dlt-config-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 4px; }
+.dlt-config-actions > span { color: #8492a6; font-size: 12px; line-height: 1.6; }
+.dlt-config-actions .point-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+@media(max-width:1100px) {
+  .dlt-device-config .dlt-config-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+@media(max-width:700px) {
+  .dlt-device-config .dlt-config-section { padding: 12px; }
+  .dlt-device-config .dlt-config-grid { grid-template-columns: minmax(0,1fr); }
+  .dlt-config-heading { flex-wrap: wrap; gap: 4px 10px; }
+  .dlt-config-credentials > summary span { display: block; margin-left: 16px; }
+  .dlt-config-actions { flex-direction: column; align-items: stretch; }
+  .dlt-config-actions .point-actions { justify-content: flex-start; }
+}
+
+/* Controls stay inside their columns; the colgroup owns resizable widths. */
+.dlt645-point-table table:not(.interactive-point-table) .dlt645-type-column {
+  width: 156px !important;
+  min-width: 156px !important;
+}
+.dlt645-point-table table:not(.interactive-point-table) .dlt645-access-column {
+  width: 104px !important;
+  min-width: 104px !important;
+}
+.dlt645-point-table table:not(.interactive-point-table) .dlt645-unit-column {
+  width: 88px !important;
+  min-width: 88px !important;
+}
+.page .dlt645-point-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.page .dlt645-point-table td input:not([type="checkbox"]),
+.page .dlt645-point-table td select {
+  display: block;
+  box-sizing: border-box;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100%;
+}
+.page .dlt645-point-table td.dlt645-type-column,
+.page .dlt645-point-table td.dlt645-access-column,
+.page .dlt645-point-table td.dlt645-scale-column,
+.page .dlt645-point-table td.dlt645-offset-column,
+.page .dlt645-point-table td.dlt645-unit-column {
+  padding: 4px 8px;
+  text-align: center;
+}
+.page .dlt645-point-table td select {
+  height: 28px;
+  padding: 2px 20px 2px 6px;
+}
+.dlt645-editor-hint { padding: 8px 12px; }
+.dlt645-editor-hint [role="alert"] { color: #b45309; margin-left: 8px; }
+@media (max-width: 700px) {
+  .dlt645-manual-editor { grid-template-columns: 1fr 1fr; }
+  .dlt645-manual-editor .form-hint { grid-column: 1 / -1; }
+}
+.dlt645-type-tag {
+  display: inline-block;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid #dfe6ef;
+  border-radius: 5px;
+  background: #f1f5f9;
+  color: #475569;
+  font: 12px/18px system-ui, sans-serif;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}

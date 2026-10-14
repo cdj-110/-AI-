@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path')
+const root = path.resolve(__dirname, '..')
+const platform = fs.readFileSync(path.resolve(root, '../web/src/assets/tenant-platform-logo.png'))
+const icon = fs.readFileSync(path.join(root, 'public/scada-monitor-icon-v2.png'))
+assert.ok(!platform.equals(icon), '云组态图标应与平台云形图标区分')
+assert.equal(icon.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
+assert.equal(icon.readUInt32BE(16), icon.readUInt32BE(20), '图标应为正方形')
+for (const folder of ['', ...(process.argv.includes('--dist') ? ['dist'] : [])]) {
+  const html = fs.readFileSync(path.join(root, folder, 'index.html'), 'utf8')
+  assert.match(html, /rel="icon" type="image\/png" href="\/scada-monitor-icon-v2\.png"/)
+  assert.match(html, /rel="apple-touch-icon" href="\/scada-monitor-icon-v2\.png"/)
+  assert.doesNotMatch(html, /rel="icon" href="\.\/logo\.png"/)
+  if (folder) assert.ok(icon.equals(fs.readFileSync(path.join(root, folder, 'scada-monitor-icon-v2.png'))))
+}
+console.log('PASS: independent square SCADA PNG, favicon/touch icon references, distinct platform brand; shared entry covers editor and preview' + (process.argv.includes('--dist') ? '; built HTML and PNG verified' : ''))

@@ -1,0 +1,11 @@
+# Ubuntu 20.04 ARM64 ships Python 3.8. Keep the runtime dependencies
+# compatible with that interpreter while matching the EG100 feature set.
+fastapi==0.115.6
+pydantic==1.10.22
+uvicorn==0.30.6
+wsproto==1.2.0
+paho-mqtt==2.1.0
+pymodbus==3.6.9
+pyserial==3.5
+python-multipart==0.0.20
+exceptiongroup==1.2.2

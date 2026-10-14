@@ -1,10 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { Roles } from '../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateTenantDto } from './dto/create-tenant.dto';
 import { UpdateTenantDto } from './dto/update-tenant.dto';
 import { TenantsService } from './tenants.service';
+import { TenantAccountsQueryDto } from './dto/tenant-accounts-query.dto';
 
 @Controller('tenants')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -25,6 +26,11 @@ export class TenantsController {
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.tenantsService.findOne(id);
+  }
+
+  @Get(':id/accounts')
+  accounts(@Param('id') id: string, @Query() query: TenantAccountsQueryDto) {
+    return this.tenantsService.accounts(id, query);
   }
 
   @Patch(':id')

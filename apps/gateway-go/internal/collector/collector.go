@@ -2,14 +2,41 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"weikong-iot-platform/apps/gateway-go/internal/config"
 	"weikong-iot-platform/apps/gateway-go/internal/model"
 )
 
+// ErrCollectionDeferred means collection did not reach the device because a
+// higher-priority operation (normally a control write) occupied the connection.
+// Callers should retain the previous value instead of reporting a link fault.
+var ErrCollectionDeferred = errors.New("collection deferred by a higher-priority operation")
+
 type Collector interface {
 	ReadPoint(ctx context.Context, point config.PointConfig) (model.PointValue, error)
+}
+
+// PointReadResult is indexed relative to the points supplied to BatchCollector.
+// Per-item errors are kept separate because OPC DA AddItems and SyncRead can
+// return S_FALSE with a mixture of successful and failed items.
+type PointReadResult struct {
+	Index int
+	Value model.PointValue
+	Err   error
+}
+
+// BatchCollector is implemented by stateful protocols whose wire API operates
+// on a group of item handles. The runtime schedules one task per BatchKey
+// instead of issuing one request per point.
+type BatchCollector interface {
+	BatchKey(point config.PointConfig) string
+	ReadPoints(ctx context.Context, points []config.PointConfig) []PointReadResult
+}
+
+type PointWriter interface {
+	WritePoint(ctx context.Context, point config.PointConfig, value interface{}) error
 }
 
 type RegisterRangeReader interface {
@@ -17,16 +44,28 @@ type RegisterRangeReader interface {
 }
 
 func New(protocol string) (Collector, error) {
+	protocol = config.NormalizeProtocol(protocol)
 	switch protocol {
 	case "modbus-tcp":
 		return ModbusTCP{}, nil
 	case "modbus-rtu":
 		return ModbusRTU{}, nil
+	case "dlt645":
+		return DLT645{}, nil
 	case "siemens-s7":
 		return SiemensS7{}, nil
 	case "iec104":
 		return IEC104{}, nil
+	case "opcua":
+		return OPCUA{}, nil
+	case "opcda":
+		return OPCDA{}, nil
+	case "iec61850-goose":
+		return IEC61850GOOSE{}, nil
 	default:
+		if collector, ok := newOptionalCollector(protocol); ok {
+			return collector, nil
+		}
 		return nil, fmt.Errorf("unsupported protocol %s", protocol)
 	}
 }

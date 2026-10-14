@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { Bell, Connection, OfficeBuilding, TrendCharts } from '@element-plus/icons-vue';
 import * as echarts from 'echarts';
 import { apiRequest } from '../api/request';
+import { isAdminPortal } from '../portal';
 
 interface Summary {
   tenantCount: number;
@@ -17,11 +18,16 @@ const statusChartRef = ref<HTMLDivElement>();
 const trendChartRef = ref<HTMLDivElement>();
 let statusChart: echarts.ECharts | undefined;
 let trendChart: echarts.ECharts | undefined;
-const cards = computed(() => [
+const cards = computed(() => isAdminPortal ? [
   { label: '租户总数', value: summary.value.tenantCount, icon: OfficeBuilding, tone: 'blue' },
-  { label: '设备总数', value: summary.value.deviceCount, icon: TrendCharts, tone: 'violet' },
+  { label: '平台设备', value: summary.value.deviceCount, icon: TrendCharts, tone: 'violet' },
   { label: '在线设备', value: summary.value.onlineDeviceCount, icon: Connection, tone: 'green' },
-  { label: '告警数量', value: summary.value.alarmCount, icon: Bell, tone: 'orange' },
+  { label: '平台告警', value: summary.value.alarmCount, icon: Bell, tone: 'orange' },
+] : [
+  { label: '设备总数', value: summary.value.deviceCount, icon: TrendCharts, tone: 'blue' },
+  { label: '在线设备', value: summary.value.onlineDeviceCount, icon: Connection, tone: 'green' },
+  { label: '离线设备', value: summary.value.offlineDeviceCount, icon: Connection, tone: 'violet' },
+  { label: '当前告警', value: summary.value.alarmCount, icon: Bell, tone: 'orange' },
 ]);
 
 function renderCharts(points: Array<{ time: string; deviceKey: string; value: number | null }>) {
@@ -78,8 +84,8 @@ onBeforeUnmount(() => {
   <div>
     <div class="page-heading">
       <div>
-        <h1>数据概览</h1>
-        <p>查看平台当前运行情况</p>
+        <h1>{{ isAdminPortal ? '平台运营概览' : '数据概览' }}</h1>
+        <p>{{ isAdminPortal ? '查看租户、设备和平台整体运行情况' : '查看本租户设备与数据运行情况' }}</p>
       </div>
       <span class="status"><i /> 服务运行正常</span>
     </div>

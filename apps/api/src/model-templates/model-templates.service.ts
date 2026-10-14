@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateTemplateFromDeviceDto } from './dto/create-template-from-device.dto';
 import { CreateModelTemplateDto, ModelTemplateMetricDto } from './dto/create-model-template.dto';
 import { UpdateModelTemplateDto } from './dto/update-model-template.dto';
+import { deviceAccessWhere } from '../common/user-permissions';
 
 @Injectable()
 export class ModelTemplatesService {
@@ -71,12 +72,11 @@ export class ModelTemplatesService {
 
   async createFromDevice(actor: AuthUser, dto: CreateTemplateFromDeviceDto) {
     // 支持把真实设备自动发现出来的字段沉淀成模板，方便后续批量复用。
-    const device = await this.prisma.device.findUnique({
-      where: { id: dto.deviceId },
+    const device = await this.prisma.device.findFirst({
+      where: { ...deviceAccessWhere(actor), id: dto.deviceId },
       include: { metrics: { orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] } },
     });
-    if (!device) throw new NotFoundException('设备不存在');
-    if (actor.role !== 'SUPER_ADMIN' && device.tenantId !== actor.tenantId) throw new ForbiddenException('无权访问该设备');
+    if (!device) throw new NotFoundException('设备不存在或无权访问');
     if (!device.metrics.length) throw new BadRequestException('该设备暂无可生成模板的物模型字段');
     return this.prisma.deviceModelTemplate.create({
       data: {
@@ -170,6 +170,16 @@ export class ModelTemplatesService {
   private async getDefaultTenantId() {
     const tenant = await this.prisma.tenant.findFirst({ where: { name: '系统默认租户' } });
     if (tenant) return tenant.id;
-    return (await this.prisma.tenant.create({ data: { name: '系统默认租户' } })).id;
+    const plan = await this.prisma.subscriptionPlan.findFirst({ where: { enabled: true }, orderBy: [{ priceCents: 'asc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }] });
+    const now = new Date(); const expiresAt = new Date(now); expiresAt.setUTCFullYear(expiresAt.getUTCFullYear() + 1);
+    const graceEndsAt = new Date(expiresAt.getTime() + (plan?.gracePeriodDays ?? 7) * 86_400_000);
+    return (await this.prisma.tenant.create({ data: {
+      name: '系统默认租户', subscriptionPlanId: plan?.id, subscriptionStartedAt: plan ? now : undefined,
+      ...(plan ? { subscription: { create: {
+        planId: plan.id, status: 'ACTIVE', billingCycle: 'YEARLY', startedAt: now, expiresAt, graceEndsAt,
+        baseDeviceLimit: plan.deviceLimit, basePointLimit: plan.pointLimit,
+        baseScadaProjectLimit: plan.scadaProjectLimit, baseUserLimit: plan.userLimit,
+      } } } : {}),
+    } })).id;
   }
 }

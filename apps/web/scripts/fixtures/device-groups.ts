@@ -1,0 +1,13 @@
+import { createApp, h } from 'vue';
+import { createPinia } from 'pinia';
+import { createRouter, createWebHistory } from 'vue-router';
+import ElementPlus from 'element-plus';
+import 'element-plus/dist/index.css';
+import '../../src/assets/main.css';
+import Devices from '../../src/views/Devices.vue';
+import { useUserStore } from '../../src/stores/user';
+const pinia = createPinia();
+const user = useUserStore(pinia);
+user.userInfo = { id: 'test-user', username: 'tester', role: new URLSearchParams(location.search).has('readonly') ? 'TENANT_USER' : 'TENANT_ADMIN', tenantId: 'test-tenant' };
+const router = createRouter({ history: createWebHistory(), routes: [{ path: '/:pathMatch(.*)*', component: Devices }] });
+createApp({ render: () => h('main', { style: 'padding:24px;min-width:0' }, h(Devices)) }).use(pinia).use(router).use(ElementPlus).mount('#app');

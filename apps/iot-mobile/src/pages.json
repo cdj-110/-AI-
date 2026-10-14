@@ -1,0 +1,90 @@
+{
+  "pages": [
+    {
+      "path": "pages/login/index",
+      "style": {
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/devices/index",
+      "style": {
+        "navigationBarTitleText": "设备",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/devices/detail",
+      "style": {
+        "navigationBarTitleText": "设备详情"
+      }
+    },
+    {
+      "path": "pages/devices/create",
+      "style": {
+        "navigationBarTitleText": "新增设备"
+      }
+    },
+    {
+      "path": "pages/gateways/bind",
+      "style": {
+        "navigationBarTitleText": "扫码绑定网关"
+      }
+    },
+    {
+      "path": "pages/admin/index",
+      "style": {
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/profile/index",
+      "style": {
+        "navigationBarTitleText": "我的"
+      }
+    },
+    {
+      "path": "pages/alarms/index",
+      "style": {
+        "navigationBarTitleText": "告警"
+      }
+    }
+  ],
+  "tabBar": {
+    "color": "#7f8da3",
+    "selectedColor": "#1677ff",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "white",
+    "height": "58px",
+    "fontSize": "12px",
+    "iconWidth": "24px",
+    "spacing": "3px",
+    "list": [
+      {
+        "pagePath": "pages/devices/index",
+        "text": "设备",
+        "iconPath": "static/tabbar/devices.png",
+        "selectedIconPath": "static/tabbar/devices-active.png"
+      },
+      {
+        "pagePath": "pages/alarms/index",
+        "text": "告警",
+        "iconPath": "static/tabbar/alarms.png",
+        "selectedIconPath": "static/tabbar/alarms-active.png"
+      },
+      {
+        "pagePath": "pages/profile/index",
+        "text": "我的",
+        "iconPath": "static/tabbar/profile.png",
+        "selectedIconPath": "static/tabbar/profile-active.png"
+      }
+    ]
+  },
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "物联云",
+    "navigationBarBackgroundColor": "#ffffff",
+    "backgroundColor": "#f4f7fb",
+    "backgroundTextStyle": "dark"
+  }
+}

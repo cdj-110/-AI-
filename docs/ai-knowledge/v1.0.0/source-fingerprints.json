@@ -1,0 +1,94 @@
+{
+  "schema_version": "1.0",
+  "knowledge_version": "1.0.0",
+  "captured_at": "2026-10-09T05:15:49.8814230+00:00",
+  "scope": "Selected local working-tree files only. Hashes are not GitHub or deployment verification.",
+  "local_head": "02e1ff59f86bc424855dcf99f4a6c066534f0cfd",
+  "tracked_changed_entries_at_read": 458,
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "4c5d0dc6df65fdf6b4f8dc60dd39630b0bb52ed1aaf34b0712895aadca6ad41f"
+    },
+    {
+      "path": "apps/web/package.json",
+      "sha256": "9e2b40f7a5477c5fa30b686aa9d766cf22d22c6973581603ef23da4acf4576cc"
+    },
+    {
+      "path": "apps/api/package.json",
+      "sha256": "a5df43f8be95093e511f59050b90283a3aa1bc7d92d838ba74d8616201ec8447"
+    },
+    {
+      "path": "apps/ingest/package.json",
+      "sha256": "610dd561b3f8dad84a3d864c7044159b869a4552954d497addf4e769291aa8b7"
+    },
+    {
+      "path": "apps/api/prisma/schema.prisma",
+      "sha256": "e70f574d6ac2f7d0ebcc4f9cd40fd61708ea8268c091fc53a911aefdb34dc479"
+    },
+    {
+      "path": "apps/ingest/prisma/schema.prisma",
+      "sha256": "b9c1a75907108f4d6e2665d297da7ac48fc15fb851fdaf99f972dc0d41f48dfd"
+    },
+    {
+      "path": "docker-compose.yml",
+      "sha256": "6ca5767580a57cf0369b94de1c5fe0d307a668432b4f36219cc29d1a3fcfb7e5"
+    },
+    {
+      "path": "apps/ingest/src/main.ts",
+      "sha256": "856ebcdc13f3c47aa36eeaee4ec2ba2b9174a8bac7d25911f58dcdb62496a54d"
+    },
+    {
+      "path": "apps/gateway-go/README.md",
+      "sha256": "6198f7dd556ec0e5a8773b00ffbbf93e0551c97c865d46288cf4cd55f3068ab2"
+    },
+    {
+      "path": "apps/gateway-go/go.mod",
+      "sha256": "01d37d12bc537eb39b3c6f789ba924ef32c27038619a344cac3519c2c412e320"
+    },
+    {
+      "path": "apps/gateway-python/README.md",
+      "sha256": "03c6f080d379e63d865dd5dea6c4d5fcb20284be62f90f12f5a92617386d011c"
+    },
+    {
+      "path": "apps/gateway-go/docs/iec61850_mms_build.md",
+      "sha256": "4fee1e0388e85a1ec0f390ba98c13fb892a98e51558181000f5924c8fab26e09"
+    },
+    {
+      "path": "apps/gateway-go/docs/opcda_t02_data_integrity_report.md",
+      "sha256": "a5f7f4c557b37ba67f9b5334c980b2abbba4e7f5ee640e04a3d2d259dc3281d7"
+    },
+    {
+      "path": "docs/gateway-authorization-security.md",
+      "sha256": "987228e5c14547948f24131b887f1a414156c82b12903c54b2ca14218d1b11a8"
+    },
+    {
+      "path": "docs/license-file-format-20260917.md",
+      "sha256": "efe717ff5bef979ae7f67058812cf4456fdac7e4b58416b1e3bba42fe067ba67"
+    },
+    {
+      "path": "docs/tenant-member-permissions-and-device-scope-20260923.md",
+      "sha256": "861c87f6dcf763474b56ed8cdf15b9cae36c593333f4cf5af7d4cd311879b68d"
+    },
+    {
+      "path": "docs/tenant-cloud-policy.md",
+      "sha256": "84143f7461b4353b026eb0b9940eff47e2b3e3ff0b18b226fbcc3e787ff57da6"
+    },
+    {
+      "path": "docs/goview-replacement-20261008.md",
+      "sha256": "0f5231163ae8462c3c8ed0e08198e4b447e198a00983435053ee29d69cd36cba"
+    },
+    {
+      "path": "docs/ingest-startup-recovery-20260919.md",
+      "sha256": "bb1241f6521b4284ebe249b043ff7835ba56a6d9fc0ff3b5419487c279796c80"
+    },
+    {
+      "path": "docs/product-catalog-20260917.md",
+      "sha256": "5344d50e2ff08bfba3960040ca9e1b6931a68c935bf8b63e447f897315178029"
+    },
+    {
+      "path": "docs/gateway-remote-maintenance-20260921.md",
+      "sha256": "67f912591854225d0c602bcf7faebf157643b54bcb0161ddb12749bc19ccdae9"
+    }
+  ]
+}

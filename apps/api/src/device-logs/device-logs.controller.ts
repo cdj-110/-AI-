@@ -21,7 +21,13 @@ export class DeviceLogsController {
     @Query('level') level = '',
     @Query('source') source = '',
     @Query('deviceId') deviceId = '',
+    @Query('startAt') startAt = '',
+    @Query('endAt') endAt = '',
+    @Query('platformOnly') platformOnly = '',
   ) {
-    return this.deviceLogsService.findAll(user, Number(page), Number(pageSize), { keyword, type, level, source, deviceId });
+    return this.deviceLogsService.findAll(user, Number(page), Number(pageSize), {
+      keyword, type, level, source, deviceId, startAt, endAt,
+      platformOnly: platformOnly === 'true',
+    });
   }
 }

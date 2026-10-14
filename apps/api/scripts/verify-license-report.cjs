@@ -1,0 +1,18 @@
+const assert=require('node:assert/strict');
+const {authorizationStatus}=require('../dist/factory-gateways/license-status');
+const now=new Date('2026-09-17T00:00:00Z');
+const report={licenseSequence:4,expiresAt:'2036-09-17T00:00:00Z',valid:true,restricted:false};
+const base={status:'BOUND',licenseSequence:4,licenseReportedAt:now,reportedLicense:report};
+assert.equal(authorizationStatus({status:'BOUND',licenseSequence:4},now).authorizationState,'WAITING_CONFIRMATION','binding cannot prove activation');
+assert.equal(authorizationStatus(base,now).authorizationState,'ACTIVE');
+const perpetual={...base,reportedLicense:{...report,expiresAt:''}};
+assert.equal(authorizationStatus(perpetual,new Date('2099-01-01T00:00:00Z')).authorizationState,'ACTIVE');
+assert.equal(authorizationStatus({...perpetual,reportedLicense:{...perpetual.reportedLicense,valid:false}},now).authorizationState,'INVALID');
+for(const expiresAt of [undefined,null,'bad-date'])assert.equal(authorizationStatus({...base,reportedLicense:{...report,expiresAt}},now).authorizationState,'INVALID','missing or invalid expiry became perpetual');
+assert.equal(authorizationStatus({...base,licenseSequence:5},now).authorizationState,'UPDATE_PENDING');
+assert.equal(authorizationStatus({...base,reportedLicense:{...report,expiresAt:now.toISOString()}},now).authorizationState,'EXPIRED');
+assert.equal(authorizationStatus({...base,reportedLicense:{...report,valid:false}},now).authorizationState,'INVALID');
+assert.equal(authorizationStatus({...base,status:'DISABLED'},now).authorizationState,'DISABLED');
+const offline=authorizationStatus({...base,licenseReportedAt:new Date(now.getTime()-100000)},now);
+assert.equal(offline.authorizationState,'ACTIVE');assert.equal(offline.authorizationReportFresh,false,'offline is not unactivated');
+console.log('Management authorization states passed: confirmation, activated, pending update, expired, invalid, disabled and offline last-known state.');

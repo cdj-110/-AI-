@@ -1,0 +1,57 @@
+import assert from 'node:assert/strict'
+import {createServer} from 'vite'
+import vue from '@vitejs/plugin-vue'
+import {mkdir} from 'node:fs/promises'
+const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright')
+const server=await createServer({configFile:false,plugins:[vue()],server:{host:'127.0.0.1',port:0},logLevel:'error'})
+let browser
+try{
+  await server.listen()
+  browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHANNEL?{channel:process.env.PLAYWRIGHT_CHANNEL}:{})})
+  const page=await browser.newPage({viewport:{width:1920,height:1000}})
+  const errors=[]
+  page.on('pageerror',error=>errors.push(error.message))
+  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/scripts/fixtures/dlt645-device.html`)
+  const form=page.locator('.dlt-device-config')
+  await form.waitFor()
+  const initial=await page.locator('#config').textContent()
+  assert.deepEqual(await form.locator('h4').allTextContents(),['基本信息','通信参数'])
+  assert.equal(await form.locator('details').getAttribute('open'),null)
+  assert.equal(await form.getByLabel('设备名称',{exact:true}).isDisabled(),true)
+  assert.equal(await form.getByRole('button',{name:'测试连接'}).isEnabled(),true)
+  await form.getByRole('button',{name:'测试连接'}).click()
+  assert.equal(await page.locator('#tested').textContent(),'1')
+  async function bounds(columns){
+    const layout=await form.locator('section[aria-label="通信参数"] .dlt-config-grid').evaluate(grid=>({columns:getComputedStyle(grid).gridTemplateColumns.split(' ').length,cells:Array.from(grid.querySelectorAll('input,select')).map(input=>{const a=input.getBoundingClientRect(),b=input.closest('label').getBoundingClientRect();return {left:a.left,right:a.right,width:a.width,parentLeft:b.left,parentRight:b.right}})}))
+    assert.equal(layout.columns,columns)
+    assert.ok(layout.cells.every(cell=>cell.width>100&&cell.left>=cell.parentLeft-1&&cell.right<=cell.parentRight+1))
+    const note=await form.locator('.dlt-config-note').first().boundingBox()
+    const section=await form.locator('section[aria-label="通信参数"]').boundingBox()
+    assert.ok(note.width>section.width-45,'hint must occupy the full section, not a narrow sidebar')
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,'no horizontal page overflow')
+  }
+  await bounds(3)
+  assert.ok((await form.locator('.dlt-config-heading').first().boundingBox()).height<30,'section heading must not inherit the application header height')
+  assert.ok((await form.locator('section[aria-label="通信参数"]').boundingBox()).height<330,'no excessive blank space')
+  await mkdir('artifacts/dlt645-device',{recursive:true})
+  await page.screenshot({path:'artifacts/dlt645-device/desktop.png',fullPage:true})
+  assert.equal(await page.locator('#config').textContent(),initial,'opening readonly settings does not modify config')
+  await page.locator('#mode').click()
+  await form.getByLabel('设备名称',{exact:true}).fill('测试电表')
+  await form.getByLabel('单次响应超时（ms）',{exact:true}).fill('1800')
+  await form.locator('summary').click()
+  const secret=form.getByLabel('4 字节密码',{exact:true})
+  assert.equal(await secret.getAttribute('type'),'password')
+  assert.equal(await secret.inputValue(),'***','masked credential remains unchanged')
+  const config=JSON.parse(await page.locator('#config').textContent())
+  assert.equal(config.name,'测试电表')
+  assert.equal(config.dlt645.responseTimeoutMilliseconds,1800)
+  assert.equal(config.dlt645.meterAddress,'010000000000')
+  await page.setViewportSize({width:1000,height:900});await bounds(2)
+  await page.setViewportSize({width:390,height:844});await bounds(1)
+  await page.screenshot({path:'artifacts/dlt645-device/mobile.png',fullPage:true})
+  await page.locator('#mode').click()
+  assert.equal(await secret.isDisabled(),true)
+  assert.deepEqual(errors,[])
+  console.log('DLT645 device layout: three/two/one columns, full-width notes, compact sections, readonly/editing and masked credentials passed')
+}finally{await browser?.close();await server.close()}

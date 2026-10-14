@@ -1,0 +1,21 @@
+const fs = require('fs'), path = require('path'), ts = require('typescript'), assert = require('node:assert/strict')
+const { parse, compileScript, compileTemplate } = require('@vue/compiler-sfc')
+const mod = { exports: {} }
+const source = fs.readFileSync(path.resolve(__dirname, '../src/utils/requestErrorMessage.ts'), 'utf8')
+new Function('exports', 'module', ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText)(mod.exports, mod)
+const message = mod.exports.requestErrorMessage
+assert.match(message({ response: { status: 413 } }), /请求内容过大/)
+assert.match(message({ response: { status: 500, data: { message: 'request entity too large' } } }), /请求内容过大/)
+assert.equal(message({ response: { status: 400, data: { message: '组态配置不能超过 2 MB' } } }), '组态配置不能超过 2 MB')
+assert.equal(message({ response: { status: 500, data: { message: 'private db detail' } } }), '服务器内部错误，请稍后重试')
+const file = 'src/views/chart/ContentHeader/headerRightBtn/index.vue'
+const sfc = fs.readFileSync(path.resolve(__dirname, '..', file), 'utf8')
+const { descriptor, errors } = parse(sfc, { filename: file }); assert.deepEqual(errors, [])
+compileScript(descriptor, { id: 'save-test' })
+assert.deepEqual(compileTemplate({ source: descriptor.template.content, filename: file, id: 'save-test' }).errors, [])
+assert.match(sfc, /width: chartEditStore.getEditCanvasConfig.width/)
+assert.match(sfc, /height: chartEditStore.getEditCanvasConfig.height/)
+assert.match(sfc, /clonedCanvas.style.overflow = 'hidden'/)
+assert.match(sfc, /await apiV1Config/)
+assert.match(sfc, /catch \{[\s\S]*return false/)
+console.log('PASS: actionable save errors, server detail protection, canvas-only thumbnail options, awaited saves and SFC compilation')

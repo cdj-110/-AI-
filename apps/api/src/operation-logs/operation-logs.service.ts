@@ -69,4 +69,29 @@ export class OperationLogsService {
     ]);
     return { items, total, page: safePage, pageSize: safePageSize };
   }
+
+  async findNfcWriteHistory(page: number, pageSize: number) {
+    const safePage = Math.max(1, Number.isFinite(page) ? page : 1);
+    const safePageSize = Math.min(100, Math.max(1, Number.isFinite(pageSize) ? pageSize : 50));
+    const where: Prisma.OperationLogWhereInput = {
+      OR: [
+        { module: 'NFC 标签' },
+        { module: '出厂网关', action: '生成 NFC 绑定凭证' },
+      ],
+    };
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.operationLog.findMany({
+        where,
+        include: {
+          tenant: { select: { id: true, name: true } },
+          user: { select: { id: true, username: true, nickname: true, role: true } },
+        },
+        skip: (safePage - 1) * safePageSize,
+        take: safePageSize,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.operationLog.count({ where }),
+    ]);
+    return { items, total, page: safePage, pageSize: safePageSize };
+  }
 }

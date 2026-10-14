@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#050B16">
+
+    <com.journeyapps.barcodescanner.DecoratedBarcodeView
+        android:id="@+id/zxing_barcode_scanner"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:zxing_framing_rect_height="280dp"
+        app:zxing_framing_rect_width="280dp"
+        app:zxing_preview_scaling_strategy="centerCrop"
+        app:zxing_possible_result_points="#001677FF"
+        app:zxing_scanner_layout="@layout/gateway_barcode_scanner"
+        app:zxing_use_texture_view="false"
+        app:zxing_viewfinder_laser_visibility="false"
+        app:zxing_viewfinder_mask="#99050B16" />
+
+    <com.weikong.iotcloud.ScanGuideView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no"
+        android:clickable="false" />
+
+    <LinearLayout
+        android:id="@+id/scanner_header"
+        android:layout_width="match_parent"
+        android:layout_height="76dp"
+        android:layout_gravity="top"
+        android:background="@drawable/scanner_header_gradient"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp">
+
+        <ImageButton
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@drawable/scanner_round_button"
+            android:contentDescription="返回"
+            android:onClick="closeScanner"
+            android:padding="10dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/scanner_back_icon"
+            android:tint="#FFFFFF" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="14dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="扫码绑定网关"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="物联云 · 快速识别"
+                android:textColor="#B8C7DB"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@drawable/scanner_bottom_gradient"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:paddingBottom="32dp"
+        android:paddingLeft="24dp"
+        android:paddingRight="24dp"
+        android:paddingTop="70dp">
+
+        <TextView
+            android:id="@+id/scanner_tip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="将网关绑定二维码完整放入框内"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="7dp"
+            android:gravity="center"
+            android:text="识别成功后将自动进入绑定确认"
+            android:textColor="#AFC0D6"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="42dp"
+            android:layout_marginTop="20dp"
+            android:background="@drawable/scanner_torch_button"
+            android:gravity="center"
+            android:minWidth="132dp"
+            android:onClick="toggleTorch"
+            android:paddingLeft="20dp"
+            android:paddingRight="20dp"
+            android:text="打开手电筒"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp" />
+    </LinearLayout>
+</FrameLayout>

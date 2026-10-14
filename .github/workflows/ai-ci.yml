@@ -1,0 +1,172 @@
+name: AI CI
+'on':
+  workflow_dispatch: null
+  push:
+    branches: ['ai/**']
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ai-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CI: 'true'
+  HUSKY: '0'
+  DATABASE_URL: postgresql://ci:ci@127.0.0.1:1/ci_unreachable
+jobs:
+  node-checks:
+    name: node-${{ matrix.module }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - module: web
+            directory: apps/web
+          - module: api
+            directory: apps/api
+          - module: ingest
+            directory: apps/ingest
+          - module: goview
+            directory: apps/goview-designer
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.directory }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22'
+      - name: Reject committed local secrets
+        working-directory: .
+        run: |
+          node tools/ci/check-tracked-paths.cjs
+          node tools/ci/check-source-secrets.cjs
+      - run: npm ci --no-audit --no-fund
+      - name: Generate Prisma client
+        if: matrix.module == 'api' || matrix.module == 'ingest'
+        run: npm run prisma:generate
+      - name: Build and scoped regression
+        env:
+          MODULE: ${{ matrix.module }}
+          NODE_OPTIONS: '--max-old-space-size=4096'
+        run: |
+          set -euo pipefail
+          case "$MODULE" in
+            web) npm run typecheck; node ../../tools/ci/verify-typecheck-gate.cjs; npm run build:all ;;
+            api)
+              npm run build
+              node scripts/verify-tenant-user-action-permissions.cjs
+              ;;
+            ingest)
+              npm run build
+              node scripts/verify-startup-readiness.cjs
+              node scripts/verify-gateway-point-access.cjs
+              ;;
+            goview) npm run build-cli ;;
+            *) exit 2 ;;
+          esac
+  api-device-scope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22'
+      - name: Reject committed local secrets
+        working-directory: .
+        run: |
+          node tools/ci/check-tracked-paths.cjs
+          node tools/ci/check-source-secrets.cjs
+      - run: npm ci --no-audit --no-fund
+      - run: npm run prisma:generate
+      - name: Confirm disposable Docker availability
+        run: docker info > /dev/null
+      - name: Test permissions against disposable PostgreSQL
+        run: npm run test:tenant-user-device-scope
+  gateway-default:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: '1'
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/gateway-go
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22'
+      - name: Reject committed local secrets
+        working-directory: .
+        run: |
+          node tools/ci/check-tracked-paths.cjs
+          node tools/ci/check-source-secrets.cjs
+      - name: Build embedded web UI in disposable checkout
+        working-directory: apps/gateway-go/webui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - uses: actions/setup-go@v5.5.0
+        with:
+          go-version-file: apps/gateway-go/go.mod
+          cache: false
+      - run: go mod download
+      - run: go mod verify
+      - run: go test -race -count=1 ./internal/mapper ./internal/state
+      - name: Build default gateway, without OPC DA or MMS claims
+        run: go build -o "$RUNNER_TEMP/weikong-gateway-ci" ./cmd/gateway
+  ci-required:
+    name: ci-required
+    if: always()
+    needs: [node-checks, api-device-scope, gateway-default]
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Fail on failed, cancelled or skipped prerequisite
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results=json.loads(os.environ['RESULTS'])
+          assert results and all(x['result']=='success' for x in results.values()), results
+          print('All required jobs succeeded for this commit.')
+          PY
+  open-review:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/ai/')
+    needs: ci-required
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Create draft PR as bot, leaving human approval to cdj-110
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list --head "$HEAD_BRANCH" --base main --state open --json number --jq 'length')
+          if [ "$existing" != 0 ]; then exit 0; fi
+          printf 'Candidate commit: `%s`\n\nLinux CI: %s\n\nHuman reviewer: @cdj-110. This draft is not approval to merge or deploy. GoView bundling does not include typechecking; hardware and production behavior remain outside CI scope.\n' "$HEAD_SHA" "$RUN_URL" > "$RUNNER_TEMP/pr-body.md"
+          gh pr create --base main --head "$HEAD_BRANCH" --draft --title "Review $HEAD_BRANCH" --body-file "$RUNNER_TEMP/pr-body.md"

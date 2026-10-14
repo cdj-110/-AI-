@@ -13,7 +13,7 @@
 ```text
 weikong-iot-platform/
   apps/
-    web/        # Vue 前端
+    web/        # Vue 前端源码（公司管理平台、租户物联网平台两套独立构建）
     api/        # NestJS API
     ingest/     # MQTT 接入服务占位
     consumer/   # 事件消费服务占位
@@ -42,15 +42,21 @@ npx prisma db seed
 npm run start:dev
 ```
 
-启动前端：
+分别启动两个前端：
 
 ```bash
 cd apps/web
 npm install
-npm run dev
+npm run dev:tenant
+# 另开终端
+npm run dev:admin
 ```
 
-浏览器访问 `http://localhost:5173`，API 默认运行在 `http://localhost:3100`。
+- 租户物联网平台：`http://localhost:5174`
+- 公司管理平台：`http://localhost:5176`
+- 共用 API：`http://localhost:3100`
+
+两个平台使用独立登录接口和角色白名单。公司管理平台只允许 `SUPER_ADMIN`，租户物联网平台只允许 `TENANT_ADMIN`、`TENANT_USER`。
 
 ## 默认账号
 
@@ -58,7 +64,7 @@ npm run dev
 
 ```text
 用户名：admin
-密码：admin123456
+密码：123456
 ```
 
 ## Docker Compose 启动
@@ -68,6 +74,8 @@ npm run dev
 ```bash
 docker compose up -d --build
 ```
+
+Compose 会同时启动 `web`（租户平台，5174）和 `admin-web`（公司管理平台，5176），二者共用 API、PostgreSQL、TimescaleDB、Redis 和 EMQX。
 
 容器方式首次启动后，初始化数据库：
 

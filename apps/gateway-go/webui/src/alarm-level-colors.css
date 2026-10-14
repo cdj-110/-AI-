@@ -1,0 +1,24 @@
+/* Account-specific alarm palette, shared by the main page and dedicated alarm tab. */
+.alarm-notification-panel .alarm-panel-card.info{border-left-color:var(--alarm-info-color)}
+.alarm-notification-panel .alarm-panel-card.info .level,.alarm-notification-panel .limits .info,.alarm-view tr:not(.disabled) .level.info{color:var(--alarm-info-text);background:var(--alarm-info-soft)}
+.alarm-view .alarm-table-wrap tr:not(.disabled):has(.level.info){box-shadow:inset 3px 0 var(--alarm-info-color)}
+.alarm-notification-panel .info-count{color:var(--alarm-info-text)}.alarm-notification-panel .info-count i{background:var(--alarm-info-color)}
+.alarm-notification-panel .alarm-panel-card.warning{border-left-color:var(--alarm-warning-color)}
+.alarm-notification-panel .alarm-panel-card.warning .level,.alarm-notification-panel .limits .warning,.alarm-view tr:not(.disabled) .level.warning{color:var(--alarm-warning-text);background:var(--alarm-warning-soft)}
+.alarm-view .alarm-table-wrap tr:not(.disabled):has(.level.warning){box-shadow:inset 3px 0 var(--alarm-warning-color)}
+.alarm-notification-panel .warning-count{color:var(--alarm-warning-text)}.alarm-notification-panel .warning-count i{background:var(--alarm-warning-color)}
+.alarm-notification-panel .alarm-panel-card.critical{border-left-color:var(--alarm-critical-color)}
+.alarm-notification-panel .alarm-panel-card.critical .level,.alarm-notification-panel .limits .critical,.alarm-view tr:not(.disabled) .level.critical{color:var(--alarm-critical-text);background:var(--alarm-critical-soft)}
+.alarm-view .alarm-table-wrap tr:not(.disabled):has(.level.critical){box-shadow:inset 3px 0 var(--alarm-critical-color)}
+.alarm-notification-panel .critical-count{color:var(--alarm-critical-text)}.alarm-notification-panel .critical-count i{background:var(--alarm-critical-color)}
+.alarm-view .alarm-summary .critical{color:var(--alarm-critical-text);border-color:var(--alarm-critical-pale);background:var(--alarm-critical-soft)}.alarm-view .alarm-summary .critical b{color:var(--alarm-critical-text)}
+.app-shell .header-alarm-button.active:not(.critical){color:var(--alarm-warning-text);border-color:var(--alarm-warning-pale);background:var(--alarm-warning-soft)}
+.app-shell .header-alarm-button.critical{color:var(--alarm-critical-text);border-color:var(--alarm-critical-pale);background:var(--alarm-critical-soft)}
+.app-shell .header-alarm-button.critical b,.app-shell .nav-alarm-count.critical{color:white;background:var(--alarm-critical-color)}
+.app-shell .header-alarm-button.active:not(.critical) b,.app-shell .nav-alarm-count:not(.critical){color:var(--alarm-warning-text);background:var(--alarm-warning-soft)}
+.app-shell .header-alarm-button.critical svg{color:var(--alarm-critical-text);background:var(--alarm-critical-soft)}
+.app-shell .header-alarm-button.critical b{border-color:var(--alarm-critical-color)}
+.app-shell .header-alarm-button.active:not(.critical) svg{color:var(--alarm-warning-text);background:var(--alarm-warning-soft)}
+.app-shell .header-alarm-button.active:not(.critical) b{border-color:var(--alarm-warning-pale)}
+.app-shell .header-alarm-button.critical{animation-name:alarm-header-custom-pulse;box-shadow:0 2px 9px var(--alarm-critical-soft)}
+@keyframes alarm-header-custom-pulse{0%,100%{border-color:var(--alarm-critical-pale)}50%{border-color:var(--alarm-critical-color)}}

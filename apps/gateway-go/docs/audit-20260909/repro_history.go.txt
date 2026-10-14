@@ -1,0 +1,13 @@
+package history
+
+import "testing"
+
+func TestAuditHistoryPreservesTaskSamples(t *testing.T) {
+ writer := &AsyncWriter{pending:make(map[string]Sample),maxPending:100}
+ writer.Enqueue([]Sample{{DeviceKey:"d",Metric:"p",Value:1,TaskKeys:[]string{"task-a"}}})
+ writer.Enqueue([]Sample{{DeviceKey:"d",Metric:"p",Value:0,TaskKeys:[]string{"task-b"}}})
+ status := writer.Status()
+ if status.Pending != 2 {
+  t.Fatalf("two selected samples became %d pending; retained=%+v; dropped=%d",status.Pending,writer.pending["d\x00p"],status.Dropped)
+ }
+}

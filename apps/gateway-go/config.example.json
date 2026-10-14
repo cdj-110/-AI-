@@ -2,12 +2,26 @@
   "gatewayKey": "gw-001",
   "collectIntervalSeconds": 5,
   "cacheFile": ".runtime/gateway-spool.jsonl",
+  "offlineCache": {
+    "enabled": false,
+    "maxSizeMB": 16,
+    "storagePath": ""
+  },
+  "activation": {
+    "file": "activation.local.json"
+  },
+  "remoteAccess": {
+    "enabled": false,
+    "endpoint": "ws://127.0.0.1:3100/api/remote-access/tunnel",
+    "localUrl": "http://127.0.0.1:8088",
+    "insecureSkipVerify": false
+  },
   "mqtt": {
     "enabled": true,
     "broker": "tcp://127.0.0.1:1883",
     "clientId": "平台里网关设备的 MQTT ClientId",
     "username": "平台里网关设备的 MQTT Username",
-    "password": "平台里网关设备的新密码"
+    "password": "CHANGE_ME_LOCAL_ONLY"
   },
   "points": [
     {
@@ -51,6 +65,19 @@
       "dataType": "uint16",
       "byteOrder": "big",
       "scale": 0.01,
+      "offset": 0
+    },
+    {
+      "deviceKey": "ied-001",
+      "name": "断路器状态",
+      "metric": "breaker_status",
+      "protocol": "iec61850",
+      "address": "192.168.1.60:102",
+      "objectRef": "LD0/XCBR1.Pos.stVal",
+      "fc": "ST",
+      "quantity": 1,
+      "dataType": "int32",
+      "scale": 1,
       "offset": 0
     }
   ],

@@ -1,19 +1,15 @@
-import { IsEmail, IsNotEmpty, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsString, Matches, MinLength } from 'class-validator';
 
 export class RegisterDto {
   @IsString()
   @IsNotEmpty()
   username: string;
 
-  @IsString()
-  @IsOptional()
-  phone?: string;
-
   @IsEmail()
-  @IsOptional()
-  email?: string;
+  email: string;
 
   @IsString()
+  @Matches(/^\d{6}$/, { message: '验证码必须为 6 位数字' })
   code: string;
 
   @IsString()
