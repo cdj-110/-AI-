@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from team import Workflow, safe_file
+from team import Workflow, safe_file, publish
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
@@ -46,5 +46,18 @@ class WorkflowTests(unittest.TestCase):
         workflow = self.workflow(path='apps/web/src/example.ts', profile='web')
         with self.assertRaisesRegex(RuntimeError, 'digest-pinned'): workflow.run()
         self.assertEqual(workflow.record['status'], 'failed')
+    def test_fixture_cannot_publish(self):
+        workflow = self.workflow()
+        workflow.run()
+        with self.assertRaisesRegex(ValueError, 'validated live candidate'):
+            publish({'state_dir':str(self.root)}, 'job')
+    def test_changed_candidate_cannot_publish(self):
+        workflow = self.workflow()
+        workflow.run()
+        record = workflow.record
+        record['mode'] = 'live_codex'
+        (workflow.dir/'status.json').write_text(json.dumps(record), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'Candidate changed'):
+            publish({'state_dir':str(self.root)}, 'job')
 
 if __name__ == '__main__': unittest.main()

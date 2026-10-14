@@ -132,10 +132,24 @@ jobs:
       - run: go test -race -count=1 ./internal/mapper ./internal/state
       - name: Build default gateway, without OPC DA or MMS claims
         run: go build -o "$RUNNER_TEMP/weikong-gateway-ci" ./cmd/gateway
+  ai-orchestrator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned scheduler dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ai-team-venv"
+          "$RUNNER_TEMP/ai-team-venv/bin/pip" install -r tools/ai-team/requirements.lock.txt
+      - name: Verify failure gates and candidate integrity
+        working-directory: tools/ai-team
+        run: '"$RUNNER_TEMP/ai-team-venv/bin/python" -m unittest -v test_team.py'
   ci-required:
     name: ci-required
     if: always()
-    needs: [node-checks, api-device-scope, gateway-default]
+    needs: [node-checks, api-device-scope, gateway-default, ai-orchestrator]
     runs-on: ubuntu-24.04
     permissions: {}
     steps:

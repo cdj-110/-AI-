@@ -58,6 +58,13 @@ class Workflow:
         if not (repo/'.git').exists():raise ValueError('Configured isolated repository is unavailable')
         ref=self.config.get('base_ref','HEAD')
         command(['git','clone','--no-hardlinks','--no-local',str(repo),str(self.work)],self.dir,self.dir/'clone.log')
+        if self.config.get('sync_main_before_task'):
+            slug=self.config['github_repository']
+            if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',slug):raise ValueError('Invalid GitHub repository')
+            args=['git']
+            if self.config.get('git_proxy'):args+=['-c','http.proxy='+self.config['git_proxy'],'-c','https.proxy='+self.config['git_proxy']]
+            command(args+['fetch','https://github.com/'+slug+'.git','main'],self.work,self.dir/'refresh-main.log',timeout=180)
+            ref='FETCH_HEAD'
         command(['git','checkout','-b','ai/task-'+self.dir.name,ref],self.work,self.dir/'branch.log')
         self.record['base_sha']=self.git('rev-parse','HEAD');self.record['branch']='ai/task-'+self.dir.name
         contexts=self.task.get('context_files',[])
@@ -115,9 +122,10 @@ class Workflow:
         else:
             profile=self.task['profile']
             image=self.config.get('test_images',{}).get(profile)
-            if not image or '@sha256:' not in image:raise RuntimeError('A prebuilt digest-pinned dependency image is required for '+profile)
+            if not image or not re.fullmatch(r'(?:[A-Za-z0-9./:_-]+@)?sha256:[a-f0-9]{64}',image):raise RuntimeError('A prebuilt digest-pinned dependency image is required for '+profile)
             # Image entrypoint is an operator-owned test harness. No host credentials/socket are mounted.
-            command(['docker','run','--rm','--network','none','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','4g','--cpus','2','--mount','type=bind,src='+str(self.work)+',dst=/workspace',image,profile],self.work,self.dir/'tests.log',timeout=1800)
+            command(['docker','run','--rm','--network','none','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','4g','--cpus','2','--mount','type=bind,src='+str(self.work)+',dst=/workspace,readonly',image,profile],self.work,self.dir/'tests.log',timeout=1800)
+            write_json(self.dir/'validation.json',{'passed':True,'scope':profile,'image':image,'log':'tests.log'})
         return {'validated':True}
     def review(self,state):
         self.persist('review')
@@ -132,6 +140,8 @@ class Workflow:
         return {'review':result}
     def finish(self,state):
         self.record['candidate_sha']=self.git('rev-parse','HEAD');self.record['validation_profile']=self.task['profile']
+        self.record['ai_review_passed']=state['review']['approved'] is True
+        self.record['files']={item['path']:hashlib.sha256((self.work/item['path']).read_bytes()).hexdigest() for item in state['development']['files']}
         self.persist('awaiting_human_publication');return {}
     def run(self):
         try:
@@ -154,15 +164,44 @@ def serve(state,port):
             encoded=body.encode();self.send_response(200);self.send_header('Content-Type','application/json; charset=utf-8' if self.path=='/health' else 'text/html; charset=utf-8');self.send_header('Content-Length',str(len(encoded)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(encoded)
     ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()
 
+def publish(config,job):
+    directory=Path(config['state_dir'])/job
+    if directory.parent.resolve()!=Path(config['state_dir']).resolve():raise ValueError('Invalid job identifier')
+    record=json.loads((directory/'status.json').read_text(encoding='utf-8'))
+    if record['mode']!='live_codex' or record['status']!='awaiting_human_publication' or record.get('ai_review_passed') is not True:raise ValueError('Only a validated live candidate can be published')
+    work=directory/'checkout'
+    def git(*args):return subprocess.check_output(['git',*args],cwd=work,text=True,encoding='utf-8').strip()
+    if git('status','--porcelain') or git('rev-parse','HEAD')!=record['candidate_sha']:raise ValueError('Candidate changed after validation')
+    actual=set(git('diff','--name-only',record['base_sha'],record['candidate_sha']).splitlines())
+    if actual!=set(record['files']):raise ValueError('Candidate file set changed')
+    for rel,digest in record['files'].items():
+        p=safe_file(work,rel,record['validation_profile'])
+        if p.is_symlink() or hashlib.sha256(p.read_bytes()).hexdigest()!=digest or SECRET.search(p.read_text(encoding='utf-8')):raise ValueError('Candidate integrity check failed')
+    slug=config['github_repository']
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',slug):raise ValueError('Invalid GitHub repository')
+    main_sha=subprocess.check_output(['gh','api','repos/'+slug+'/branches/main','--jq','.commit.sha'],text=True).strip()
+    if main_sha!=record['base_sha']:raise ValueError('Candidate must be based on current main; refresh the isolated base and rerun')
+    branch=record['branch']
+    if not re.fullmatch(r'ai/task-[0-9]{8}-[0-9]{6}-[a-f0-9]{6}',branch):raise ValueError('Invalid candidate branch')
+    args=['git']
+    if config.get('git_proxy'):
+        args+=['-c','http.proxy='+config['git_proxy'],'-c','https.proxy='+config['git_proxy']]
+    command(args+['push','https://github.com/'+slug+'.git','HEAD:refs/heads/'+branch],work,directory/'publish.log',timeout=180)
+    record['status']='published_awaiting_ci_and_human_review';record['updated_at']=time.time();write_json(directory/'status.json',record)
+    print(json.dumps({'branch':branch,'candidate_sha':record['candidate_sha'],'next':'CI creates a bot-authored draft PR after all required checks pass'},ensure_ascii=False))
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--config',default=str(ROOT/'config.local.json'));sub=parser.add_subparsers(dest='command',required=True)
     submit=sub.add_parser('run');submit.add_argument('--task',required=True)
-    sub.add_parser('doctor');web=sub.add_parser('serve');web.add_argument('--port',type=int,default=18741)
+    sub.add_parser('doctor');submit=sub.add_parser('publish');submit.add_argument('--job',required=True)
+    web=sub.add_parser('serve');web.add_argument('--port',type=int,default=18741)
     args=parser.parse_args();config=json.loads(Path(args.config).read_text(encoding='utf-8'));state=Path(config['state_dir']);state.mkdir(parents=True,exist_ok=True)
     if args.command=='serve':serve(state,args.port);return
+    if args.command=='publish':publish(config,args.job);return
     if args.command=='doctor':
         p=subprocess.run([config['codex'],'login','status'],capture_output=True,text=True)
-        print(json.dumps({'codex_login_ready':p.returncode==0,'repository_exists':Path(config['repository']).exists(),'merge_capability':False,'publish_automatic':False}));return
+        ready=p.returncode==0 and (Path(config['repository'])/'.git').exists()
+        print(json.dumps({'codex_login_ready':p.returncode==0,'repository_exists':(Path(config['repository'])/'.git').exists(),'merge_capability':False,'publish_automatic':False}));sys.exit(0 if ready else 1)
     task=json.loads(Path(args.task).read_text(encoding='utf-8'))
     if task.get('profile') not in PROFILES or not task.get('title') or not task.get('request'):raise ValueError('Invalid task')
     directory=state/(time.strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:6]);directory.mkdir()
